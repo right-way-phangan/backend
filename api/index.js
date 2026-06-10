@@ -1054,6 +1054,7 @@ async function listLeads(db2, limit = 500) {
     kind: leads.kind,
     tags: leads.tags,
     createdAt: leads.createdAt,
+    updatedAt: leads.updatedAt,
     contactName: contacts.firstName,
     email: contacts.email,
     phone: contacts.phone,
