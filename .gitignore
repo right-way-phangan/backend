@@ -1,0 +1,11 @@
+node_modules/
+.pgdata/
+.env
+.env.local
+dist/
+*.log
+
+.DS_Store
+.vercel
+
+api/index.js

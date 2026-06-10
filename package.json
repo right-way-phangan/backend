@@ -1,0 +1,39 @@
+{
+  "name": "rightway-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Right Way — own Postgres DB + API (replaces amoCRM catalog 9077 and, later, the CRM). Phase A: object DB.",
+  "scripts": {
+    "build": "esbuild src/api/vercel-entry.ts --bundle --platform=node --format=esm --packages=external --outfile=api/index.js",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "migrate:amocrm": "tsx src/scripts/migrate-from-amocrm.ts",
+    "migrate:leads": "tsx src/scripts/migrate-leads-from-amocrm.ts",
+    "create-user": "PGLITE_DIR=./.pgdata tsx src/scripts/create-user.ts",
+    "load:local": "tsx src/scripts/load-local.ts",
+    "api:local": "PGLITE_DIR=./.pgdata tsx src/api/server.ts",
+    "api": "tsx src/api/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/lib/*.test.ts"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.2.17",
+    "@hono/node-server": "^2.0.4",
+    "@types/bcryptjs": "^2.4.6",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.36.4",
+    "hono": "^4.12.25",
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.20",
+    "drizzle-kit": "^0.28.1",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

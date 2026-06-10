@@ -1,0 +1,23 @@
+# Postgres for the VPS (and for local dev once Docker is installed).
+# On the VPS this is the only DB; it binds to localhost so it is never exposed
+# to the internet — the API (same host) reaches it over 127.0.0.1.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rightway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rightway}
+      POSTGRES_DB: rightway
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rightway -d rightway"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

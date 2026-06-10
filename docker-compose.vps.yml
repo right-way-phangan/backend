@@ -1,0 +1,60 @@
+# Full VPS stack: Postgres + API + Caddy (auto-TLS reverse proxy).
+# Postgres binds to localhost only (never exposed); the API reaches it over the
+# internal docker network; Caddy terminates HTTPS for the public API domain.
+#
+#   cp .env.vps.example .env.vps   # fill POSTGRES_PASSWORD, API_TOKEN, AMOCRM_*, API_DOMAIN
+#   docker compose -f docker-compose.vps.yml --env-file .env.vps up -d
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rightway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: rightway
+    ports:
+      - "127.0.0.1:5432:5432" # localhost only
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rightway -d rightway"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://rightway:${POSTGRES_PASSWORD}@db:5432/rightway
+      API_TOKEN: ${API_TOKEN}
+      API_PORT: "8787"
+      # For in-container migrations (npm run migrate:amocrm / migrate:leads):
+      AMOCRM_DOMAIN: ${AMOCRM_DOMAIN}
+      AMOCRM_TOKEN: ${AMOCRM_TOKEN}
+      AMOCRM_OBJECTS_CATALOG_ID: ${AMOCRM_OBJECTS_CATALOG_ID:-9077}
+    expose:
+      - "8787"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,5 @@
+# Auto-HTTPS (Let's Encrypt) reverse proxy for the API. The domain must point
+# (A record) at the VPS before first start so Caddy can issue the certificate.
+{$API_DOMAIN} {
+	reverse_proxy api:8787
+}

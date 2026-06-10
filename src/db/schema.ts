@@ -1,0 +1,319 @@
+/**
+ * Right Way — own object DB (Phase A of the amoCRM migration).
+ *
+ * This schema is the canonical replacement for the amoCRM catalog 9077. It
+ * mirrors the domain type `RealEstateObject` (web/src/types/object.ts) 1:1 so
+ * the public site keeps consuming the same shape — only the source changes from
+ * amoCRM to this Postgres DB (served via the VPS API).
+ *
+ * Design choices:
+ * - Dictionary-ish fields (type/status/district/zone/tenure/…) are plain `text`,
+ *   not pg enums. Validation lives in the app layer (zod), mirroring the bot's
+ *   "fail soft on unknown enum" philosophy — so an enum change never requires a
+ *   DB migration. Allowed values: web/.../amocrm/dictionaries.ts + types/object.ts.
+ * - Photos and docs are child tables (object_photos / object_docs) so the media
+ *   publication rule (public photos vs internal/confidential docs) is enforced
+ *   per-asset at the schema/permission level instead of "delete the blob by hand".
+ * - Off-plan landing extras (video/floorplan/priceStages/timeline/team) stay as
+ *   array/jsonb columns on the object — they are small and project-only.
+ */
+
+import {
+  pgTable,
+  serial,
+  bigint,
+  text,
+  doublePrecision,
+  integer,
+  boolean,
+  jsonb,
+  timestamp,
+  index,
+} from "drizzle-orm/pg-core";
+
+export const objects = pgTable(
+  "objects",
+  {
+    // Identity
+    id: serial("id").primaryKey(),
+    rwNumber: text("rw_number").notNull().unique(), // RW-L0001 / RW-V0001 / RW-A0001 / RW-P0001
+    amoElementId: bigint("amo_element_id", { mode: "number" }), // migration traceability; null for native
+    circleCode: text("circle_code"),
+    titleEn: text("title_en"),
+
+    // Classification
+    type: text("type").notNull().default("Land"),
+    status: text("status").notNull().default("Active"),
+    district: text("district"),
+    zone: text("zone"),
+    documentType: text("document_type"),
+    tenure: text("tenure").array(), // multi-select
+
+    // Geometry
+    areaRai: doublePrecision("area_rai"),
+    areaSqm: doublePrecision("area_sqm"),
+    areaNote: text("area_note"),
+    altitude: doublePrecision("altitude"),
+    terrain: text("terrain"),
+
+    // Pricing (land sale)
+    priceThb: doublePrecision("price_thb"),
+    pricePerRai: doublePrecision("price_per_rai"),
+
+    // Pricing (leasehold)
+    rentPerRaiMonth: doublePrecision("rent_per_rai_month"),
+    leaseTermYears: doublePrecision("lease_term_years"),
+    leaseEscPercent: doublePrecision("lease_esc_percent"),
+    leaseEscPeriodYears: doublePrecision("lease_esc_period_years"),
+    leaseEscNotes: text("lease_esc_notes"),
+    leaseAdditionalTerms: text("lease_additional_terms"),
+
+    // Building (villa/house/apartment)
+    bedrooms: doublePrecision("bedrooms"),
+    bathrooms: doublePrecision("bathrooms"),
+    buildYear: integer("build_year"),
+    condition: text("condition"),
+    pool: boolean("pool").notNull().default(false),
+    privateGarden: boolean("private_garden").notNull().default(false),
+    parking: boolean("parking").notNull().default(false),
+    gated: boolean("gated").notNull().default(false),
+
+    // Features
+    seaView: boolean("sea_view").notNull().default(false),
+    beachfront: boolean("beachfront").notNull().default(false),
+    mountainView: boolean("mountain_view").notNull().default(false),
+    jungleView: boolean("jungle_view").notNull().default(false),
+    flatLand: boolean("flat_land").notNull().default(false),
+    quiet: boolean("quiet").notNull().default(false),
+    electricity: boolean("electricity").notNull().default(false),
+
+    // Infrastructure
+    roadType: text("road_type"),
+    waterType: text("water_type"),
+    internetType: text("internet_type"),
+
+    // Off-plan / developer project
+    stage: text("stage"),
+    developer: text("developer"),
+    completion: text("completion"),
+    paymentTerms: text("payment_terms"),
+    furnishing: text("furnishing"),
+    netYieldPct: doublePrecision("net_yield_pct"),
+    estNetIncomeYear: doublePrecision("est_net_income_year"),
+    leasePrepayment: doublePrecision("lease_prepayment"),
+    unitsTotal: integer("units_total"),
+    unitsAvailable: integer("units_available"),
+
+    // Developer-project landing extras (structured from textarea fields)
+    videoUrls: text("video_urls").array(),
+    floorplanUrls: text("floorplan_urls").array(),
+    priceStages: jsonb("price_stages").$type<Array<{ label: string; value: string }>>(),
+    timeline: jsonb("timeline").$type<Array<{ date: string; event: string }>>(),
+    team: jsonb("team").$type<Array<{ role: string; name: string }>>(),
+
+    // Operational
+    ownerName: text("owner_name"),
+    buildingRules: text("building_rules"),
+    reasonForSelling: text("reason_for_selling"),
+    timeOnMarketMonths: doublePrecision("time_on_market_months"),
+    dateAdded: text("date_added"), // free-form as stored in amoCRM; our own ts is createdAt
+
+    // External
+    driveFolder: text("drive_folder"),
+    locationUrl: text("location_url"),
+    lat: doublePrecision("lat"),
+    lng: doublePrecision("lng"),
+    siteUrl: text("site_url"),
+
+    // Description
+    descriptionRaw: text("description_raw"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    statusTypeIdx: index("objects_status_type_idx").on(t.status, t.type),
+    districtIdx: index("objects_district_idx").on(t.district),
+  }),
+);
+
+/**
+ * Public photos. Replaces the PHOTOS JSON field. `isCover` marks the cover
+ * image (villa/house/project = exterior, land = aerial — enforced in app).
+ * `visibility` stays 'public' here; non-public imagery belongs in object_docs.
+ */
+export const objectPhotos = pgTable(
+  "object_photos",
+  {
+    id: serial("id").primaryKey(),
+    objectId: integer("object_id")
+      .notNull()
+      .references(() => objects.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    sort: integer("sort").notNull().default(0),
+    isCover: boolean("is_cover").notNull().default(false),
+    visibility: text("visibility").notNull().default("public"), // public | internal
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ objIdx: index("object_photos_object_idx").on(t.objectId) }),
+);
+
+/**
+ * Working documents — NON-public. Replaces the DOCS JSON field. Title-deed
+ * scans, cadastral maps, contracts. `visibility`:
+ *  - 'internal'      — team-visible working files
+ *  - 'confidential'  — developer price/commission sheets; never leave the DB
+ * Confidentiality is now a column + permission, not a manual "delete blob" step.
+ */
+export const objectDocs = pgTable(
+  "object_docs",
+  {
+    id: serial("id").primaryKey(),
+    objectId: integer("object_id")
+      .notNull()
+      .references(() => objects.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    url: text("url").notNull(),
+    visibility: text("visibility").notNull().default("internal"), // internal | confidential
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ objIdx: index("object_docs_object_idx").on(t.objectId) }),
+);
+
+/**
+ * Per-unit detail for multi-unit off-plan projects (RW-P####, unit suffixes).
+ * Forward-looking: the current amoCRM model only tracks unitsTotal/unitsAvailable
+ * as counts, so the migration leaves this empty. New off-plan intake will fill it.
+ */
+export const projectUnits = pgTable(
+  "project_units",
+  {
+    id: serial("id").primaryKey(),
+    objectId: integer("object_id")
+      .notNull()
+      .references(() => objects.id, { onDelete: "cascade" }),
+    unitCode: text("unit_code").notNull(), // e.g. RW-P0001-A
+    status: text("status"),
+    priceThb: doublePrecision("price_thb"),
+    bedrooms: doublePrecision("bedrooms"),
+    areaSqm: doublePrecision("area_sqm"),
+    note: text("note"),
+  },
+  (t) => ({ objIdx: index("project_units_object_idx").on(t.objectId) }),
+);
+
+export type ObjectRow = typeof objects.$inferSelect;
+export type ObjectInsert = typeof objects.$inferInsert;
+
+// ============================================================
+// CRM (Phase B) — own replacement for amoCRM leads/contacts/pipelines.
+// Lead-capture spine first: website forms write here instead of /leads/complex.
+// ============================================================
+
+export const pipelines = pgTable("pipelines", {
+  id: serial("id").primaryKey(),
+  key: text("key").notNull().unique(), // "land" | "villa_house"
+  name: text("name").notNull(),
+  sort: integer("sort").notNull().default(0),
+});
+
+export const stages = pgTable(
+  "stages",
+  {
+    id: serial("id").primaryKey(),
+    pipelineId: integer("pipeline_id")
+      .notNull()
+      .references(() => pipelines.id, { onDelete: "cascade" }),
+    key: text("key").notNull(), // stable per-pipeline key (e.g. "incoming")
+    name: text("name").notNull(),
+    sort: integer("sort").notNull().default(0),
+    isWon: boolean("is_won").notNull().default(false),
+    isLost: boolean("is_lost").notNull().default(false),
+  },
+  (t) => ({ pipeIdx: index("stages_pipeline_idx").on(t.pipelineId) }),
+);
+
+export const contacts = pgTable(
+  "contacts",
+  {
+    id: serial("id").primaryKey(),
+    firstName: text("first_name"),
+    email: text("email"),
+    phone: text("phone"),
+    amoContactId: bigint("amo_contact_id", { mode: "number" }).unique(), // migration traceability
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    emailIdx: index("contacts_email_idx").on(t.email),
+    phoneIdx: index("contacts_phone_idx").on(t.phone),
+  }),
+);
+
+export const leads = pgTable(
+  "leads",
+  {
+    id: serial("id").primaryKey(),
+    name: text("name").notNull(),
+    pipelineId: integer("pipeline_id").references(() => pipelines.id),
+    stageId: integer("stage_id").references(() => stages.id),
+    contactId: integer("contact_id").references(() => contacts.id, { onDelete: "set null" }),
+    status: text("status").notNull().default("open"), // open | won | lost
+    amoLeadId: bigint("amo_lead_id", { mode: "number" }).unique(), // migration traceability
+    rwNumber: text("rw_number"), // object the inquiry is about, if any
+    source: text("source"), // "object" | "contact"
+    kind: text("kind"), // inquiry | calculator | market-report | shortlist | saved-search
+    tags: text("tags").array(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    stageIdx: index("leads_stage_idx").on(t.stageId),
+    contactIdx: index("leads_contact_idx").on(t.contactId),
+  }),
+);
+
+export const leadNotes = pgTable(
+  "lead_notes",
+  {
+    id: serial("id").primaryKey(),
+    leadId: integer("lead_id")
+      .notNull()
+      .references(() => leads.id, { onDelete: "cascade" }),
+    text: text("text").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ leadIdx: index("lead_notes_lead_idx").on(t.leadId) }),
+);
+
+/**
+ * CRM users (Phase B auth) — per-person logins + roles, replacing the single
+ * shared Basic Auth. No per-seat license: add as many rows as the team needs.
+ */
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  name: text("name"),
+  role: text("role").notNull().default("agent"), // admin | agent
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type UserRow = typeof users.$inferSelect;
+
+export const leadTasks = pgTable(
+  "lead_tasks",
+  {
+    id: serial("id").primaryKey(),
+    leadId: integer("lead_id")
+      .notNull()
+      .references(() => leads.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    dueAt: timestamp("due_at", { withTimezone: true }),
+    done: boolean("done").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ leadIdx: index("lead_tasks_lead_idx").on(t.leadId) }),
+);
+
+export type LeadRow = typeof leads.$inferSelect;
+export type LeadInsert = typeof leads.$inferInsert;
