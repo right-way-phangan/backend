@@ -109,7 +109,9 @@ export async function createLead(
   });
 }
 
-/** Leads with contact + stage + pipeline (names + keys) — for the CRM board. */
+/** Leads with contact + stage + pipeline (names + keys) — for the CRM board.
+ * Each row also carries open-task counters so the board can flag follow-ups:
+ * `openTasks` (not done) and `overdueTasks` (not done + dueAt in the past). */
 export async function listLeads(db: AnyPgDatabase, limit = 500) {
   const rows = await db
     .select({
@@ -136,7 +138,26 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
     .leftJoin(stages, eq(leads.stageId, stages.id))
     .orderBy(desc(leads.createdAt))
     .limit(limit);
-  return rows;
+
+  // Open-task counters per lead (one query, aggregated in JS).
+  const open = await db
+    .select({ leadId: leadTasks.leadId, dueAt: leadTasks.dueAt })
+    .from(leadTasks)
+    .where(eq(leadTasks.done, false));
+  const now = Date.now();
+  const byLead = new Map<number, { open: number; overdue: number }>();
+  for (const t of open) {
+    const e = byLead.get(t.leadId) ?? { open: 0, overdue: 0 };
+    e.open += 1;
+    if (t.dueAt && new Date(t.dueAt).getTime() < now) e.overdue += 1;
+    byLead.set(t.leadId, e);
+  }
+
+  return rows.map((r) => ({
+    ...r,
+    openTasks: byLead.get(r.id)?.open ?? 0,
+    overdueTasks: byLead.get(r.id)?.overdue ?? 0,
+  }));
 }
 
 /** One lead with contact, pipeline/stage, notes and tasks — the detail card. */
