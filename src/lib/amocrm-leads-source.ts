@@ -64,7 +64,8 @@ export interface ContactInfo {
 export interface MappedLead {
   amoLeadId: number;
   name: string;
-  pipelineKey: "land" | "villa_house";
+  /** Working pipelines, or "legacy" when the migration routes Circle-era leads to triage. */
+  pipelineKey: "land" | "villa_house" | "legacy";
   stageName?: string;
   createdAt: Date;
   rwNumber?: string;

@@ -6,7 +6,40 @@
 import { eq } from "drizzle-orm";
 import { contacts, leads, leadNotes, pipelines, stages } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
-import type { MappedLead } from "./amocrm-leads-source";
+import type { ContactInfo, MappedLead } from "./amocrm-leads-source";
+
+/**
+ * Upsert the full amoCRM contact book (idempotent by amo_contact_id), so the
+ * own CRM keeps every past client even when their lead isn't imported.
+ * Contacts without name/email/phone are skipped — an empty row helps nobody.
+ */
+export async function loadContacts(
+  db: AnyPgDatabase,
+  all: Iterable<ContactInfo>,
+): Promise<{ upserted: number; skipped: number }> {
+  let upserted = 0;
+  let skipped = 0;
+  for (const c of all) {
+    if (!c.name && !c.email && !c.phone) {
+      skipped += 1;
+      continue;
+    }
+    await db
+      .insert(contacts)
+      .values({
+        firstName: c.name,
+        email: c.email,
+        phone: c.phone,
+        amoContactId: c.amoContactId,
+      })
+      .onConflictDoUpdate({
+        target: contacts.amoContactId,
+        set: { firstName: c.name, email: c.email, phone: c.phone },
+      });
+    upserted += 1;
+  }
+  return { upserted, skipped };
+}
 
 export async function loadLeads(
   db: AnyPgDatabase,
@@ -26,7 +59,9 @@ export async function loadLeads(
 
   for (const m of mapped) {
     let contactId: number | undefined;
-    if (m.contact) {
+    // Skip fully empty contacts (legacy Circle has some): nothing to upsert,
+    // and an all-NULL update set crashes onConflictDoUpdate.
+    if (m.contact && (m.contact.name || m.contact.email || m.contact.phone)) {
       const [c] = await db
         .insert(contacts)
         .values({

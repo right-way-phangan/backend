@@ -1018,25 +1018,50 @@ async function updateObject(db2, rwNumber, patch) {
 import { eq as eq3, and, asc, desc, sql as sql2 } from "drizzle-orm";
 var PIPELINES = [
   { key: "land", name: "Land", sort: 0 },
-  { key: "villa_house", name: "Villas & Houses", sort: 1 }
+  { key: "villa_house", name: "Villas & Houses", sort: 1 },
+  // Imported Circle-era leads land here for manual triage; revived ones are
+  // re-created in a working pipeline, dead ones closed in place.
+  { key: "legacy", name: "\u0420\u0430\u0437\u0431\u043E\u0440 (legacy)", sort: 9 }
 ];
-var STAGES = [
+var DEAL_STAGES = [
   { key: "incoming", name: "Incoming", sort: 0, isWon: false, isLost: false },
   { key: "contacted", name: "Contacted", sort: 1, isWon: false, isLost: false },
-  { key: "viewing", name: "Viewing", sort: 2, isWon: false, isLost: false },
-  { key: "negotiation", name: "Negotiation", sort: 3, isWon: false, isLost: false },
-  { key: "won", name: "Won", sort: 4, isWon: true, isLost: false },
-  { key: "lost", name: "Lost", sort: 5, isWon: false, isLost: true }
+  { key: "qualified", name: "Qualified", sort: 2, isWon: false, isLost: false },
+  { key: "viewing", name: "Viewing", sort: 3, isWon: false, isLost: false },
+  { key: "negotiation", name: "Offer / Negotiation", sort: 4, isWon: false, isLost: false },
+  { key: "reservation", name: "Reservation", sort: 5, isWon: false, isLost: false },
+  { key: "dd", name: "Due Diligence", sort: 6, isWon: false, isLost: false },
+  { key: "spa", name: "Contract (SPA)", sort: 7, isWon: false, isLost: false },
+  { key: "transfer", name: "Transfer", sort: 8, isWon: false, isLost: false },
+  { key: "won", name: "Won", sort: 9, isWon: true, isLost: false },
+  { key: "lost", name: "Lost", sort: 10, isWon: false, isLost: true }
 ];
+var LEGACY_STAGES = [
+  { key: "incoming", name: "\u0420\u0430\u0437\u043E\u0431\u0440\u0430\u0442\u044C", sort: 0, isWon: false, isLost: false },
+  { key: "contacted", name: "\u0421\u0432\u044F\u0437\u0430\u043B\u0438\u0441\u044C", sort: 1, isWon: false, isLost: false },
+  { key: "revived", name: "\u0420\u0435\u0430\u043D\u0438\u043C\u0438\u0440\u043E\u0432\u0430\u043D \u2192 \u0432 \u0440\u0430\u0431\u043E\u0442\u0443", sort: 2, isWon: false, isLost: false },
+  { key: "dead", name: "\u041C\u0451\u0440\u0442\u0432", sort: 3, isWon: false, isLost: true }
+];
+function stagesFor(pipelineKey) {
+  return pipelineKey === "legacy" ? LEGACY_STAGES : DEAL_STAGES;
+}
 async function seedCrm(db2) {
   for (const p of PIPELINES) {
     await db2.insert(pipelines).values(p).onConflictDoNothing({ target: pipelines.key });
   }
   const pipes = await db2.select().from(pipelines);
   for (const p of pipes) {
+    const canon = stagesFor(p.key);
     const existing = await db2.select().from(stages).where(eq3(stages.pipelineId, p.id));
-    if (existing.length) continue;
-    await db2.insert(stages).values(STAGES.map((s) => ({ ...s, pipelineId: p.id })));
+    const byKey = new Map(existing.map((s) => [s.key, s]));
+    for (const s of canon) {
+      const cur = byKey.get(s.key);
+      if (!cur) {
+        await db2.insert(stages).values({ ...s, pipelineId: p.id });
+      } else if (cur.name !== s.name || cur.sort !== s.sort || cur.isWon !== s.isWon || cur.isLost !== s.isLost) {
+        await db2.update(stages).set({ name: s.name, sort: s.sort, isWon: s.isWon, isLost: s.isLost }).where(eq3(stages.id, cur.id));
+      }
+    }
   }
 }
 async function createLead(db2, input) {

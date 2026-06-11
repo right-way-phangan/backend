@@ -12,3 +12,4 @@ dist/
 # git auto-deploy has the function present without relying on Vercel to run the
 # build (Vercel classifies this layout as static and skips it). `npm run build`
 # regenerates it; rebuild + commit when src/api changes.
+.pgdata-smoke/

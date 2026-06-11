@@ -10,28 +10,72 @@ import type { AnyPgDatabase } from "./load";
 const PIPELINES = [
   { key: "land", name: "Land", sort: 0 },
   { key: "villa_house", name: "Villas & Houses", sort: 1 },
+  // Imported Circle-era leads land here for manual triage; revived ones are
+  // re-created in a working pipeline, dead ones closed in place.
+  { key: "legacy", name: "Разбор (legacy)", sort: 9 },
 ] as const;
 
-// Same stage set per pipeline. First (incoming) is where new leads land.
-const STAGES = [
+// Full deal cycle for the working pipelines (lead playbook funnel:
+// first touch → qualification → viewing → offer → reservation → DD → SPA →
+// transfer). First (incoming) is where new leads land.
+const DEAL_STAGES = [
   { key: "incoming", name: "Incoming", sort: 0, isWon: false, isLost: false },
   { key: "contacted", name: "Contacted", sort: 1, isWon: false, isLost: false },
-  { key: "viewing", name: "Viewing", sort: 2, isWon: false, isLost: false },
-  { key: "negotiation", name: "Negotiation", sort: 3, isWon: false, isLost: false },
-  { key: "won", name: "Won", sort: 4, isWon: true, isLost: false },
-  { key: "lost", name: "Lost", sort: 5, isWon: false, isLost: true },
+  { key: "qualified", name: "Qualified", sort: 2, isWon: false, isLost: false },
+  { key: "viewing", name: "Viewing", sort: 3, isWon: false, isLost: false },
+  { key: "negotiation", name: "Offer / Negotiation", sort: 4, isWon: false, isLost: false },
+  { key: "reservation", name: "Reservation", sort: 5, isWon: false, isLost: false },
+  { key: "dd", name: "Due Diligence", sort: 6, isWon: false, isLost: false },
+  { key: "spa", name: "Contract (SPA)", sort: 7, isWon: false, isLost: false },
+  { key: "transfer", name: "Transfer", sort: 8, isWon: false, isLost: false },
+  { key: "won", name: "Won", sort: 9, isWon: true, isLost: false },
+  { key: "lost", name: "Lost", sort: 10, isWon: false, isLost: true },
 ] as const;
 
-/** Idempotent: create pipelines + their stages if missing. Safe to re-run. */
+const LEGACY_STAGES = [
+  { key: "incoming", name: "Разобрать", sort: 0, isWon: false, isLost: false },
+  { key: "contacted", name: "Связались", sort: 1, isWon: false, isLost: false },
+  { key: "revived", name: "Реанимирован → в работу", sort: 2, isWon: false, isLost: false },
+  { key: "dead", name: "Мёртв", sort: 3, isWon: false, isLost: true },
+] as const;
+
+type StageSeed = { key: string; name: string; sort: number; isWon: boolean; isLost: boolean };
+
+function stagesFor(pipelineKey: string): readonly StageSeed[] {
+  return pipelineKey === "legacy" ? LEGACY_STAGES : DEAL_STAGES;
+}
+
+/**
+ * Idempotent: create pipelines + their stages if missing, and SYNC existing
+ * stages to the canonical set (insert new keys, update name/sort/flags) so a
+ * re-seed upgrades an older DB to the full deal cycle without losing leads
+ * (stage rows are updated in place, ids stay stable).
+ */
 export async function seedCrm(db: AnyPgDatabase): Promise<void> {
   for (const p of PIPELINES) {
     await db.insert(pipelines).values(p).onConflictDoNothing({ target: pipelines.key });
   }
   const pipes = await db.select().from(pipelines);
   for (const p of pipes) {
+    const canon = stagesFor(p.key);
     const existing = await db.select().from(stages).where(eq(stages.pipelineId, p.id));
-    if (existing.length) continue;
-    await db.insert(stages).values(STAGES.map((s) => ({ ...s, pipelineId: p.id })));
+    const byKey = new Map(existing.map((s) => [s.key, s]));
+    for (const s of canon) {
+      const cur = byKey.get(s.key);
+      if (!cur) {
+        await db.insert(stages).values({ ...s, pipelineId: p.id });
+      } else if (
+        cur.name !== s.name ||
+        cur.sort !== s.sort ||
+        cur.isWon !== s.isWon ||
+        cur.isLost !== s.isLost
+      ) {
+        await db
+          .update(stages)
+          .set({ name: s.name, sort: s.sort, isWon: s.isWon, isLost: s.isLost })
+          .where(eq(stages.id, cur.id));
+      }
+    }
   }
 }
 
