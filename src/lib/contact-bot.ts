@@ -29,7 +29,7 @@ export interface ContactBotConfig {
 
 const SITE = "https://rightwaygroup.co";
 const FLOOD_WINDOW_MS = 60_000;
-const FLOOD_MAX = 8; // messages/min from one chat before we stop relaying
+const FLOOD_MAX = 16; // thread rows/min from one chat (~8 messages, 2 rows each) before we stop relaying
 
 const GREETING =
   "🌴 *Right Way Phangan*\n\n" +
@@ -195,13 +195,20 @@ export async function handleContactUpdate(
   }
 
   const uname = msg.from.username ? `@${msg.from.username}` : "—";
+  const label = `${fullName(msg.from)} ${uname}`.trim();
   const header =
     `📩 *Новый контакт с сайта*\n` +
     `От: ${fullName(msg.from)} (${uname}, id \`${msg.from.id}\`)${firstContact ? " · 🆕 лид заведён" : ""}\n` +
-    `↩️ Ответь reply на сообщение ниже.`;
+    `↩️ Ответь reply на это или следующее сообщение.`;
 
   try {
-    await tg(cfg, "sendMessage", { chat_id: cfg.ownerId, text: header, parse_mode: "Markdown" });
+    // Map BOTH the header and the copied message → this client, so the owner's
+    // reply routes back whether they reply to the header or to the content.
+    const head = (await tg(cfg, "sendMessage", {
+      chat_id: cfg.ownerId,
+      text: header,
+      parse_mode: "Markdown",
+    })) as { message_id: number };
     const copy = (await tg(cfg, "copyMessage", {
       chat_id: cfg.ownerId,
       from_chat_id: msg.chat.id,
@@ -209,11 +216,10 @@ export async function handleContactUpdate(
     })) as { message_id: number };
     await db
       .insert(contactThreads)
-      .values({
-        ownerMsgId: copy.message_id,
-        clientChatId: msg.chat.id,
-        clientLabel: `${fullName(msg.from)} ${uname}`.trim(),
-      })
+      .values([
+        { ownerMsgId: head.message_id, clientChatId: msg.chat.id, clientLabel: label },
+        { ownerMsgId: copy.message_id, clientChatId: msg.chat.id, clientLabel: label },
+      ])
       .onConflictDoNothing();
   } catch (err) {
     console.error("[contact-bot] forward to owner failed:", (err as Error).message);
@@ -234,18 +240,28 @@ export async function handleContactUpdate(
  * — the most expensive class of bug for an agency — surfaces within a day.
  */
 export async function contactSelfCheck(
+  db: AnyPgDatabase,
   cfg: ContactBotConfig,
   expectedUrl: string,
 ): Promise<{ healthy: boolean; problems: string[] }> {
+  const problems: string[] = [];
+
+  // Telegram side: is the webhook registered and error-free?
   const info = (await tg(cfg, "getWebhookInfo", {})) as {
     url?: string;
     last_error_message?: string;
     pending_update_count?: number;
   };
-  const problems: string[] = [];
   if (info.url !== expectedUrl) problems.push(`url: ${info.url || "(none)"} ≠ ${expectedUrl}`);
   if (info.last_error_message) problems.push(`last_error: ${info.last_error_message}`);
   if ((info.pending_update_count ?? 0) > 20) problems.push(`pending: ${info.pending_update_count}`);
+
+  // DB side: can the function reach Neon? If not, leads silently fail to save.
+  try {
+    await db.select({ id: contactThreads.ownerMsgId }).from(contactThreads).limit(1);
+  } catch (err) {
+    problems.push(`db unreachable: ${(err as Error).message}`);
+  }
 
   if (problems.length) {
     await tg(cfg, "sendMessage", {

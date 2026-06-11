@@ -1291,7 +1291,7 @@ async function verifyLogin(db2, email, password) {
 import { eq as eq5 } from "drizzle-orm";
 var SITE = "https://rightwaygroup.co";
 var FLOOD_WINDOW_MS = 6e4;
-var FLOOD_MAX = 8;
+var FLOOD_MAX = 16;
 var GREETING = "\u{1F334} *Right Way Phangan*\n\nHi! Send your question about land, villas or houses on Koh Phangan \u2014 a real person will reply here. Feel free to share your budget, area or a listing link.\n\n\u041F\u0440\u0438\u0432\u0435\u0442! \u041D\u0430\u043F\u0438\u0448\u0438\u0442\u0435 \u0432\u0430\u0448 \u0432\u043E\u043F\u0440\u043E\u0441 \u043F\u043E \u0437\u0435\u043C\u043B\u0435, \u0432\u0438\u043B\u043B\u0430\u043C \u0438 \u0434\u043E\u043C\u0430\u043C \u043D\u0430 \u041F\u0430\u043D\u0433\u0430\u043D\u0435 \u2014 \u043E\u0442\u0432\u0435\u0442\u0438\u0442 \u0436\u0438\u0432\u043E\u0439 \u0447\u0435\u043B\u043E\u0432\u0435\u043A. \u041C\u043E\u0436\u043D\u043E \u0441\u0440\u0430\u0437\u0443 \u0443\u043A\u0430\u0437\u0430\u0442\u044C \u0431\u044E\u0434\u0436\u0435\u0442, \u0440\u0430\u0439\u043E\u043D \u0438\u043B\u0438 \u0441\u0441\u044B\u043B\u043A\u0443 \u043D\u0430 \u043E\u0431\u044A\u0435\u043A\u0442.";
 var CLIENT_ACK = "\u0421\u043F\u0430\u0441\u0438\u0431\u043E! \u0421\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043E \u2014 \u043E\u0442\u0432\u0435\u0442\u0438\u043C \u0437\u0434\u0435\u0441\u044C \u0436\u0435.\n\nThanks! We've got your message and will reply right here.";
 var COMMANDS = {
@@ -1395,21 +1395,25 @@ async function handleContactUpdate(db2, update, cfg) {
     }
   }
   const uname = msg.from.username ? `@${msg.from.username}` : "\u2014";
+  const label = `${fullName(msg.from)} ${uname}`.trim();
   const header = `\u{1F4E9} *\u041D\u043E\u0432\u044B\u0439 \u043A\u043E\u043D\u0442\u0430\u043A\u0442 \u0441 \u0441\u0430\u0439\u0442\u0430*
 \u041E\u0442: ${fullName(msg.from)} (${uname}, id \`${msg.from.id}\`)${firstContact ? " \xB7 \u{1F195} \u043B\u0438\u0434 \u0437\u0430\u0432\u0435\u0434\u0451\u043D" : ""}
-\u21A9\uFE0F \u041E\u0442\u0432\u0435\u0442\u044C reply \u043D\u0430 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u043D\u0438\u0436\u0435.`;
+\u21A9\uFE0F \u041E\u0442\u0432\u0435\u0442\u044C reply \u043D\u0430 \u044D\u0442\u043E \u0438\u043B\u0438 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435.`;
   try {
-    await tg(cfg, "sendMessage", { chat_id: cfg.ownerId, text: header, parse_mode: "Markdown" });
+    const head = await tg(cfg, "sendMessage", {
+      chat_id: cfg.ownerId,
+      text: header,
+      parse_mode: "Markdown"
+    });
     const copy = await tg(cfg, "copyMessage", {
       chat_id: cfg.ownerId,
       from_chat_id: msg.chat.id,
       message_id: msg.message_id
     });
-    await db2.insert(contactThreads).values({
-      ownerMsgId: copy.message_id,
-      clientChatId: msg.chat.id,
-      clientLabel: `${fullName(msg.from)} ${uname}`.trim()
-    }).onConflictDoNothing();
+    await db2.insert(contactThreads).values([
+      { ownerMsgId: head.message_id, clientChatId: msg.chat.id, clientLabel: label },
+      { ownerMsgId: copy.message_id, clientChatId: msg.chat.id, clientLabel: label }
+    ]).onConflictDoNothing();
   } catch (err) {
     console.error("[contact-bot] forward to owner failed:", err.message);
   }
@@ -1421,12 +1425,17 @@ async function handleContactUpdate(db2, update, cfg) {
   }).catch(() => {
   });
 }
-async function contactSelfCheck(cfg, expectedUrl) {
-  const info = await tg(cfg, "getWebhookInfo", {});
+async function contactSelfCheck(db2, cfg, expectedUrl) {
   const problems = [];
+  const info = await tg(cfg, "getWebhookInfo", {});
   if (info.url !== expectedUrl) problems.push(`url: ${info.url || "(none)"} \u2260 ${expectedUrl}`);
   if (info.last_error_message) problems.push(`last_error: ${info.last_error_message}`);
   if ((info.pending_update_count ?? 0) > 20) problems.push(`pending: ${info.pending_update_count}`);
+  try {
+    await db2.select({ id: contactThreads.ownerMsgId }).from(contactThreads).limit(1);
+  } catch (err) {
+    problems.push(`db unreachable: ${err.message}`);
+  }
   if (problems.length) {
     await tg(cfg, "sendMessage", {
       chat_id: cfg.ownerId,
@@ -1485,7 +1494,7 @@ app.get("/telegram/selfcheck", async (c) => {
   }
   if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
   try {
-    const result = await contactSelfCheck(CONTACT_BOT, CONTACT_WEBHOOK_URL);
+    const result = await contactSelfCheck(db, CONTACT_BOT, CONTACT_WEBHOOK_URL);
     return c.json(result);
   } catch (err) {
     console.error("[GET /telegram/selfcheck]", err.message);

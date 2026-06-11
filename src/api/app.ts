@@ -101,7 +101,7 @@ app.get("/telegram/selfcheck", async (c) => {
   }
   if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
   try {
-    const result = await contactSelfCheck(CONTACT_BOT, CONTACT_WEBHOOK_URL);
+    const result = await contactSelfCheck(db, CONTACT_BOT, CONTACT_WEBHOOK_URL);
     return c.json(result);
   } catch (err) {
     console.error("[GET /telegram/selfcheck]", (err as Error).message);
