@@ -258,6 +258,7 @@ export const leads = pgTable(
     stageId: integer("stage_id").references(() => stages.id),
     contactId: integer("contact_id").references(() => contacts.id, { onDelete: "set null" }),
     status: text("status").notNull().default("open"), // open | won | lost
+    lostReason: text("lost_reason"), // why the deal was lost (price | changed-mind | competitor | no-reply | other:…)
     amoLeadId: bigint("amo_lead_id", { mode: "number" }).unique(), // migration traceability
     rwNumber: text("rw_number"), // object the inquiry is about, if any
     source: text("source"), // "object" | "contact"

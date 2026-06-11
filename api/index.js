@@ -228,6 +228,8 @@ var leads = pgTable(
     contactId: integer("contact_id").references(() => contacts.id, { onDelete: "set null" }),
     status: text("status").notNull().default("open"),
     // open | won | lost
+    lostReason: text("lost_reason"),
+    // why the deal was lost (price | changed-mind | competitor | no-reply | other:…)
     amoLeadId: bigint("amo_lead_id", { mode: "number" }).unique(),
     // migration traceability
     rwNumber: text("rw_number"),
@@ -1000,7 +1002,7 @@ async function updateObject(db2, rwNumber, patch) {
 }
 
 // src/lib/crm.ts
-import { eq as eq3, and, asc, desc } from "drizzle-orm";
+import { eq as eq3, and, asc, desc, sql as sql2 } from "drizzle-orm";
 var PIPELINES = [
   { key: "land", name: "Land", sort: 0 },
   { key: "villa_house", name: "Villas & Houses", sort: 1 }
@@ -1076,6 +1078,7 @@ async function listLeads(db2, limit = 500) {
     id: leads.id,
     name: leads.name,
     status: leads.status,
+    lostReason: leads.lostReason,
     rwNumber: leads.rwNumber,
     source: leads.source,
     kind: leads.kind,
@@ -1091,6 +1094,11 @@ async function listLeads(db2, limit = 500) {
     stageKey: stages.key,
     stageId: stages.id
   }).from(leads).leftJoin(contacts, eq3(leads.contactId, contacts.id)).leftJoin(pipelines, eq3(leads.pipelineId, pipelines.id)).leftJoin(stages, eq3(leads.stageId, stages.id)).orderBy(desc(leads.createdAt)).limit(limit);
+  const lastEvent = await db2.select({
+    leadId: leadEvents.leadId,
+    last: sql2`max(${leadEvents.createdAt})`
+  }).from(leadEvents).groupBy(leadEvents.leadId);
+  const stageSinceByLead = new Map(lastEvent.map((e) => [e.leadId, e.last]));
   const open = await db2.select({ leadId: leadTasks.leadId, dueAt: leadTasks.dueAt }).from(leadTasks).where(eq3(leadTasks.done, false));
   const now = Date.now();
   const byLead = /* @__PURE__ */ new Map();
@@ -1103,7 +1111,8 @@ async function listLeads(db2, limit = 500) {
   return rows.map((r) => ({
     ...r,
     openTasks: byLead.get(r.id)?.open ?? 0,
-    overdueTasks: byLead.get(r.id)?.overdue ?? 0
+    overdueTasks: byLead.get(r.id)?.overdue ?? 0,
+    stageSince: stageSinceByLead.get(r.id) ?? null
   }));
 }
 async function getLead(db2, id) {
@@ -1111,6 +1120,7 @@ async function getLead(db2, id) {
     id: leads.id,
     name: leads.name,
     status: leads.status,
+    lostReason: leads.lostReason,
     rwNumber: leads.rwNumber,
     source: leads.source,
     kind: leads.kind,
@@ -1178,6 +1188,18 @@ async function deleteLead(db2, id) {
   }
   return { id };
 }
+async function listEvents(db2, limit = 200) {
+  return db2.select({
+    id: leadEvents.id,
+    leadId: leadEvents.leadId,
+    type: leadEvents.type,
+    fromStage: leadEvents.fromStage,
+    toStage: leadEvents.toStage,
+    createdAt: leadEvents.createdAt,
+    leadName: leads.name,
+    contactName: contacts.firstName
+  }).from(leadEvents).leftJoin(leads, eq3(leadEvents.leadId, leads.id)).leftJoin(contacts, eq3(leads.contactId, contacts.id)).orderBy(desc(leadEvents.createdAt)).limit(limit);
+}
 async function listPipelines(db2) {
   const pipes = await db2.select().from(pipelines).orderBy(asc(pipelines.sort));
   const allStages = await db2.select().from(stages).orderBy(asc(stages.sort));
@@ -1193,12 +1215,14 @@ async function updateLead(db2, id, patch) {
   if (!lead) return null;
   const set = { updatedAt: /* @__PURE__ */ new Date() };
   if (patch.status) set.status = patch.status;
+  if (typeof patch.lostReason === "string") set.lostReason = patch.lostReason.trim() || null;
   let stageEvent = null;
   if (patch.stageKey && lead.pipelineId != null) {
     const [st] = await db2.select().from(stages).where(and(eq3(stages.pipelineId, lead.pipelineId), eq3(stages.key, patch.stageKey)));
     if (st) {
       set.stageId = st.id;
       set.status = st.isWon ? "won" : st.isLost ? "lost" : "open";
+      if (!st.isLost && typeof patch.lostReason !== "string") set.lostReason = null;
       if (st.id !== lead.stageId) {
         const [old] = lead.stageId ? await db2.select().from(stages).where(eq3(stages.id, lead.stageId)) : [];
         stageEvent = { fromStage: old?.name ?? null, toStage: st.name };
@@ -1309,6 +1333,11 @@ app.get("/leads", async (c) => {
 });
 app.get("/pipelines", async (c) => {
   const data = await listPipelines(db);
+  return c.json(data);
+});
+app.get("/events", async (c) => {
+  const limit = Math.min(Number(c.req.query("limit")) || 200, 500);
+  const data = await listEvents(db, limit);
   return c.json(data);
 });
 app.patch("/leads/:id", async (c) => {

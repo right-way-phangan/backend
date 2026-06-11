@@ -3,7 +3,7 @@
  * /leads/complex. Website forms send a normalized payload; we persist
  * contact + lead + first note, routed into a pipeline/stage.
  */
-import { eq, and, asc, desc } from "drizzle-orm";
+import { eq, and, asc, desc, sql } from "drizzle-orm";
 import { pipelines, stages, contacts, leads, leadNotes, leadTasks, leadEvents } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
 
@@ -135,6 +135,7 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
       id: leads.id,
       name: leads.name,
       status: leads.status,
+      lostReason: leads.lostReason,
       rwNumber: leads.rwNumber,
       source: leads.source,
       kind: leads.kind,
@@ -157,6 +158,16 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
     .orderBy(desc(leads.createdAt))
     .limit(limit);
 
+  // When the lead landed on its current stage (last event), for "days on stage".
+  const lastEvent = await db
+    .select({
+      leadId: leadEvents.leadId,
+      last: sql<string>`max(${leadEvents.createdAt})`,
+    })
+    .from(leadEvents)
+    .groupBy(leadEvents.leadId);
+  const stageSinceByLead = new Map(lastEvent.map((e) => [e.leadId, e.last]));
+
   // Open-task counters per lead (one query, aggregated in JS).
   const open = await db
     .select({ leadId: leadTasks.leadId, dueAt: leadTasks.dueAt })
@@ -175,6 +186,7 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
     ...r,
     openTasks: byLead.get(r.id)?.open ?? 0,
     overdueTasks: byLead.get(r.id)?.overdue ?? 0,
+    stageSince: stageSinceByLead.get(r.id) ?? null,
   }));
 }
 
@@ -185,6 +197,7 @@ export async function getLead(db: AnyPgDatabase, id: number) {
       id: leads.id,
       name: leads.name,
       status: leads.status,
+      lostReason: leads.lostReason,
       rwNumber: leads.rwNumber,
       source: leads.source,
       kind: leads.kind,
@@ -302,6 +315,26 @@ export async function deleteLead(db: AnyPgDatabase, id: number): Promise<{ id: n
   return { id };
 }
 
+/** Recent lead activity across the whole CRM — dashboard feed + cycle analytics. */
+export async function listEvents(db: AnyPgDatabase, limit = 200) {
+  return db
+    .select({
+      id: leadEvents.id,
+      leadId: leadEvents.leadId,
+      type: leadEvents.type,
+      fromStage: leadEvents.fromStage,
+      toStage: leadEvents.toStage,
+      createdAt: leadEvents.createdAt,
+      leadName: leads.name,
+      contactName: contacts.firstName,
+    })
+    .from(leadEvents)
+    .leftJoin(leads, eq(leadEvents.leadId, leads.id))
+    .leftJoin(contacts, eq(leads.contactId, contacts.id))
+    .orderBy(desc(leadEvents.createdAt))
+    .limit(limit);
+}
+
 /** Pipelines with their ordered stages — board columns. */
 export async function listPipelines(db: AnyPgDatabase) {
   const pipes = await db.select().from(pipelines).orderBy(asc(pipelines.sort));
@@ -321,12 +354,13 @@ export async function listPipelines(db: AnyPgDatabase) {
 export async function updateLead(
   db: AnyPgDatabase,
   id: number,
-  patch: { stageKey?: string; status?: string },
+  patch: { stageKey?: string; status?: string; lostReason?: string },
 ): Promise<{ id: number } | null> {
   const [lead] = await db.select().from(leads).where(eq(leads.id, id));
   if (!lead) return null;
   const set: Record<string, unknown> = { updatedAt: new Date() };
   if (patch.status) set.status = patch.status;
+  if (typeof patch.lostReason === "string") set.lostReason = patch.lostReason.trim() || null;
   let stageEvent: { fromStage: string | null; toStage: string } | null = null;
   if (patch.stageKey && lead.pipelineId != null) {
     const [st] = await db
@@ -336,6 +370,7 @@ export async function updateLead(
     if (st) {
       set.stageId = st.id;
       set.status = st.isWon ? "won" : st.isLost ? "lost" : "open";
+      if (!st.isLost && typeof patch.lostReason !== "string") set.lostReason = null; // back in play
       if (st.id !== lead.stageId) {
         const [old] = lead.stageId
           ? await db.select().from(stages).where(eq(stages.id, lead.stageId))

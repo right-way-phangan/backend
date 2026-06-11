@@ -20,6 +20,7 @@ import { createObject, updateObject, addObjectPhotos, ObjectInputError } from ".
 import {
   createLead, listLeads, listPipelines, updateLead, seedCrm,
   getLead, addNote, addTask, toggleTask, updateLeadContact, deleteLead,
+  listEvents,
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
 
@@ -135,6 +136,13 @@ app.get("/leads", async (c) => {
 /** Pipelines + ordered stages (board columns). */
 app.get("/pipelines", async (c) => {
   const data = await listPipelines(db);
+  return c.json(data);
+});
+
+/** Recent lead activity (stage moves + creations) — dashboard feed. */
+app.get("/events", async (c) => {
+  const limit = Math.min(Number(c.req.query("limit")) || 200, 500);
+  const data = await listEvents(db, limit);
   return c.json(data);
 });
 
