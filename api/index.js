@@ -1259,8 +1259,19 @@ async function verifyLogin(db2, email, password) {
 
 // src/lib/contact-bot.ts
 import { eq as eq5 } from "drizzle-orm";
+var SITE = "https://rightwaygroup.co";
+var FLOOD_WINDOW_MS = 6e4;
+var FLOOD_MAX = 8;
 var GREETING = "\u{1F334} *Right Way Phangan*\n\nHi! Send your question about land, villas or houses on Koh Phangan \u2014 a real person will reply here. Feel free to share your budget, area or a listing link.\n\n\u041F\u0440\u0438\u0432\u0435\u0442! \u041D\u0430\u043F\u0438\u0448\u0438\u0442\u0435 \u0432\u0430\u0448 \u0432\u043E\u043F\u0440\u043E\u0441 \u043F\u043E \u0437\u0435\u043C\u043B\u0435, \u0432\u0438\u043B\u043B\u0430\u043C \u0438 \u0434\u043E\u043C\u0430\u043C \u043D\u0430 \u041F\u0430\u043D\u0433\u0430\u043D\u0435 \u2014 \u043E\u0442\u0432\u0435\u0442\u0438\u0442 \u0436\u0438\u0432\u043E\u0439 \u0447\u0435\u043B\u043E\u0432\u0435\u043A. \u041C\u043E\u0436\u043D\u043E \u0441\u0440\u0430\u0437\u0443 \u0443\u043A\u0430\u0437\u0430\u0442\u044C \u0431\u044E\u0434\u0436\u0435\u0442, \u0440\u0430\u0439\u043E\u043D \u0438\u043B\u0438 \u0441\u0441\u044B\u043B\u043A\u0443 \u043D\u0430 \u043E\u0431\u044A\u0435\u043A\u0442.";
 var CLIENT_ACK = "\u0421\u043F\u0430\u0441\u0438\u0431\u043E! \u0421\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043E \u2014 \u043E\u0442\u0432\u0435\u0442\u0438\u043C \u0437\u0434\u0435\u0441\u044C \u0436\u0435.\n\nThanks! We've got your message and will reply right here.";
+var COMMANDS = {
+  "/start": GREETING,
+  "/help": GREETING,
+  "/listings": `Our current listings with photos, map and filters: ${SITE}/listings \u{1F3DD}\uFE0F`,
+  "/site": `Right Way Phangan: ${SITE}`,
+  "/calculator": `Estimate rental yield / ROI here: ${SITE}/calculator \u{1F4CA}`,
+  "/contact": `Email hello@rightwaygroup.co \xB7 Telegram channel https://t.me/rightwayphangan \xB7 WhatsApp https://wa.me/66843627784`
+};
 async function tg(cfg, method, body) {
   const res = await fetch(`https://api.telegram.org/bot${cfg.token}/${method}`, {
     method: "POST",
@@ -1274,6 +1285,21 @@ async function tg(cfg, method, body) {
 function fullName(u2) {
   if (!u2) return "?";
   return [u2.first_name, u2.last_name].filter(Boolean).join(" ") || (u2.username ?? "?");
+}
+async function createTelegramLead(db2, msg, user) {
+  const uname = user.username ? `@${user.username}` : "\u2014";
+  const body = (msg.text ?? msg.caption ?? "(media message)").trim();
+  await createLead(db2, {
+    leadName: `Telegram \u2014 ${fullName(user)}`,
+    pipeline: "land",
+    // type unknown at first touch; routes to the default board
+    contact: { name: fullName(user) },
+    note: `\u0418\u0437 Telegram (@rightwayphangan_bot). \u041A\u043E\u043D\u0442\u0430\u043A\u0442: ${uname}, id ${user.id}.
+\u0421\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435: ${body}`,
+    source: "telegram",
+    kind: "inquiry",
+    tags: ["telegram", "contact-bot"]
+  });
 }
 async function handleContactUpdate(db2, update, cfg) {
   const msg = update.message;
@@ -1307,18 +1333,36 @@ async function handleContactUpdate(db2, update, cfg) {
     }
     return;
   }
-  if (msg.text && msg.text.trim().startsWith("/start")) {
-    await tg(cfg, "sendMessage", {
-      chat_id: msg.chat.id,
-      text: GREETING,
-      parse_mode: "Markdown"
-    }).catch(() => {
-    });
-    return;
+  const text2 = (msg.text ?? "").trim();
+  if (text2.startsWith("/")) {
+    const cmd = text2.split(/\s+/)[0].toLowerCase().replace(/@.*$/, "");
+    const reply = COMMANDS[cmd];
+    if (reply) {
+      await tg(cfg, "sendMessage", {
+        chat_id: msg.chat.id,
+        text: reply,
+        parse_mode: cmd === "/start" || cmd === "/help" ? "Markdown" : void 0,
+        disable_web_page_preview: true
+      }).catch(() => {
+      });
+      return;
+    }
+  }
+  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq5(contactThreads.clientChatId, msg.chat.id));
+  const firstContact = history.length === 0;
+  const cutoff = new Date(Date.now() - FLOOD_WINDOW_MS);
+  const recent = history.filter((h2) => h2.createdAt > cutoff).length;
+  if (recent >= FLOOD_MAX) return;
+  if (firstContact) {
+    try {
+      await createTelegramLead(db2, msg, msg.from);
+    } catch (err) {
+      console.error("[contact-bot] lead create failed:", err.message);
+    }
   }
   const uname = msg.from.username ? `@${msg.from.username}` : "\u2014";
   const header = `\u{1F4E9} *\u041D\u043E\u0432\u044B\u0439 \u043A\u043E\u043D\u0442\u0430\u043A\u0442 \u0441 \u0441\u0430\u0439\u0442\u0430*
-\u041E\u0442: ${fullName(msg.from)} (${uname}, id \`${msg.from.id}\`)
+\u041E\u0442: ${fullName(msg.from)} (${uname}, id \`${msg.from.id}\`)${firstContact ? " \xB7 \u{1F195} \u043B\u0438\u0434 \u0437\u0430\u0432\u0435\u0434\u0451\u043D" : ""}
 \u21A9\uFE0F \u041E\u0442\u0432\u0435\u0442\u044C reply \u043D\u0430 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u043D\u0438\u0436\u0435.`;
   try {
     await tg(cfg, "sendMessage", { chat_id: cfg.ownerId, text: header, parse_mode: "Markdown" });
@@ -1335,8 +1379,30 @@ async function handleContactUpdate(db2, update, cfg) {
   } catch (err) {
     console.error("[contact-bot] forward to owner failed:", err.message);
   }
-  await tg(cfg, "sendMessage", { chat_id: msg.chat.id, text: CLIENT_ACK }).catch(() => {
+  await tg(cfg, "sendMessage", {
+    chat_id: msg.chat.id,
+    text: firstContact ? GREETING : CLIENT_ACK,
+    parse_mode: firstContact ? "Markdown" : void 0,
+    disable_web_page_preview: true
+  }).catch(() => {
   });
+}
+async function contactSelfCheck(cfg, expectedUrl) {
+  const info = await tg(cfg, "getWebhookInfo", {});
+  const problems = [];
+  if (info.url !== expectedUrl) problems.push(`url: ${info.url || "(none)"} \u2260 ${expectedUrl}`);
+  if (info.last_error_message) problems.push(`last_error: ${info.last_error_message}`);
+  if ((info.pending_update_count ?? 0) > 20) problems.push(`pending: ${info.pending_update_count}`);
+  if (problems.length) {
+    await tg(cfg, "sendMessage", {
+      chat_id: cfg.ownerId,
+      text: `\u{1F534} *contact-bot webhook \u043D\u0435\u0437\u0434\u043E\u0440\u043E\u0432*
+${problems.join("\n")}`,
+      parse_mode: "Markdown"
+    }).catch(() => {
+    });
+  }
+  return { healthy: problems.length === 0, problems };
 }
 
 // src/api/app.ts
@@ -1347,6 +1413,8 @@ var CONTACT_BOT = process.env.TG_CONTACT_BOT_TOKEN ? {
   ownerId: Number(process.env.TG_CONTACT_OWNER_ID ?? 0)
 } : null;
 var CONTACT_WEBHOOK_SECRET = process.env.TG_CONTACT_WEBHOOK_SECRET;
+var CONTACT_WEBHOOK_URL = "https://rightway-api.vercel.app/telegram/contact";
+var CRON_SECRET = process.env.CRON_SECRET;
 var { db, driver, applyMigrations } = await createDb();
 if (!ON_VERCEL) {
   await applyMigrations();
@@ -1376,6 +1444,19 @@ app.post("/telegram/contact", async (c) => {
     console.error("[POST /telegram/contact]", err.message);
   }
   return c.json({ ok: true });
+});
+app.get("/telegram/selfcheck", async (c) => {
+  if (CRON_SECRET && c.req.header("authorization") !== `Bearer ${CRON_SECRET}`) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
+  try {
+    const result = await contactSelfCheck(CONTACT_BOT, CONTACT_WEBHOOK_URL);
+    return c.json(result);
+  } catch (err) {
+    console.error("[GET /telegram/selfcheck]", err.message);
+    return c.json({ healthy: false, error: err.message }, 500);
+  }
 });
 app.post("/auth/login", async (c) => {
   const { email, password } = await c.req.json();

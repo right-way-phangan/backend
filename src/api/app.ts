@@ -23,7 +23,7 @@ import {
   listEvents,
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
-import { handleContactUpdate, type ContactBotConfig } from "../lib/contact-bot";
+import { handleContactUpdate, contactSelfCheck, type ContactBotConfig } from "../lib/contact-bot";
 
 const API_TOKEN = process.env.API_TOKEN;
 const ON_VERCEL = !!process.env.VERCEL;
@@ -36,6 +36,8 @@ const CONTACT_BOT: ContactBotConfig | null = process.env.TG_CONTACT_BOT_TOKEN
     }
   : null;
 const CONTACT_WEBHOOK_SECRET = process.env.TG_CONTACT_WEBHOOK_SECRET;
+const CONTACT_WEBHOOK_URL = "https://rightway-api.vercel.app/telegram/contact";
+const CRON_SECRET = process.env.CRON_SECRET; // Vercel sends it as `Bearer` on cron hits
 
 const { db, driver, applyMigrations } = await createDb();
 // On Vercel each cold start would otherwise re-run migrate+seed; do them once at
@@ -85,6 +87,26 @@ app.post("/telegram/contact", async (c) => {
     console.error("[POST /telegram/contact]", (err as Error).message);
   }
   return c.json({ ok: true });
+});
+
+/**
+ * Daily lead-channel health probe (Vercel cron → vercel.json). Verifies the
+ * Telegram webhook is registered and error-free; pings the owner via the bot
+ * only when it isn't. Gated by CRON_SECRET (Vercel sends it as a Bearer token)
+ * so it can't be triggered publicly.
+ */
+app.get("/telegram/selfcheck", async (c) => {
+  if (CRON_SECRET && c.req.header("authorization") !== `Bearer ${CRON_SECRET}`) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
+  try {
+    const result = await contactSelfCheck(CONTACT_BOT, CONTACT_WEBHOOK_URL);
+    return c.json(result);
+  } catch (err) {
+    console.error("[GET /telegram/selfcheck]", (err as Error).message);
+    return c.json({ healthy: false, error: (err as Error).message }, 500);
+  }
 });
 
 /** Verify CRM user credentials. Web issues its own session cookie on success. */

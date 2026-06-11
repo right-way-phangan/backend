@@ -3,25 +3,33 @@
  *
  * Two-way forwarder, no polling, no local disk (replaces bot/contact_bot.py +
  * bot/contact_threads.json once the webhook is set):
- *   • Client messages the bot   → copied to the OWNER chat with a header.
+ *   • Client messages the bot   → copied to the OWNER chat with a header, and on
+ *     FIRST contact a lead is created in the CRM (Neon /leads) so the inquiry
+ *     lands in the same funnel as website forms — not just a chat.
  *   • Owner replies to that copy → relayed back to the originating client.
- *   • /start                    → bilingual greeting.
+ *   • /start, /help, /listings…  → bilingual greeting / quick links.
  *
  * Thread state (owner copy message_id → client chat id) lives in the
- * contact_threads table (Neon), so it survives cold starts. Telegram delivers
- * each update once; we best-effort process and always 200 so Telegram doesn't
- * retry-storm. Config comes from env (token / owner id), validated by caller.
+ * contact_threads table (Neon), so it survives cold starts and doubles as the
+ * "have we seen this client before" + light flood-guard signal. Telegram
+ * delivers each update once; we best-effort process and always 200 so Telegram
+ * doesn't retry-storm. Config comes from env (token / owner id).
  *
  * See memory project_contact_bot_and_messenger_links.
  */
-import { eq } from "drizzle-orm";
+import { and, eq, gte } from "drizzle-orm";
 import { contactThreads } from "../db/schema";
+import { createLead } from "./crm";
 import type { AnyPgDatabase } from "./load";
 
 export interface ContactBotConfig {
   token: string;
   ownerId: number;
 }
+
+const SITE = "https://rightwaygroup.co";
+const FLOOD_WINDOW_MS = 60_000;
+const FLOOD_MAX = 8; // messages/min from one chat before we stop relaying
 
 const GREETING =
   "🌴 *Right Way Phangan*\n\n" +
@@ -33,6 +41,16 @@ const GREETING =
 const CLIENT_ACK =
   "Спасибо! Сообщение получено — ответим здесь же.\n\n" +
   "Thanks! We've got your message and will reply right here.";
+
+/** Slash-command quick replies. Keys are matched case-insensitively. */
+const COMMANDS: Record<string, string> = {
+  "/start": GREETING,
+  "/help": GREETING,
+  "/listings": `Our current listings with photos, map and filters: ${SITE}/listings 🏝️`,
+  "/site": `Right Way Phangan: ${SITE}`,
+  "/calculator": `Estimate rental yield / ROI here: ${SITE}/calculator 📊`,
+  "/contact": `Email hello@rightwaygroup.co · Telegram channel https://t.me/rightwayphangan · WhatsApp https://wa.me/66843627784`,
+};
 
 /** Minimal slices of the Telegram update we use. */
 interface TgUser {
@@ -47,6 +65,7 @@ interface TgMessage {
   from?: TgUser;
   chat: { id: number; type: string };
   text?: string;
+  caption?: string;
   reply_to_message?: { message_id: number };
 }
 export interface TgUpdate {
@@ -71,9 +90,23 @@ function fullName(u?: TgUser): string {
   return [u.first_name, u.last_name].filter(Boolean).join(" ") || (u.username ?? "?");
 }
 
+/** First contact → open a CRM lead so the bot inquiry enters the funnel. */
+async function createTelegramLead(db: AnyPgDatabase, msg: TgMessage, user: TgUser): Promise<void> {
+  const uname = user.username ? `@${user.username}` : "—";
+  const body = (msg.text ?? msg.caption ?? "(media message)").trim();
+  await createLead(db, {
+    leadName: `Telegram — ${fullName(user)}`,
+    pipeline: "land", // type unknown at first touch; routes to the default board
+    contact: { name: fullName(user) },
+    note: `Из Telegram (@rightwayphangan_bot). Контакт: ${uname}, id ${user.id}.\nСообщение: ${body}`,
+    source: "telegram",
+    kind: "inquiry",
+    tags: ["telegram", "contact-bot"],
+  });
+}
+
 /**
- * Process one Telegram update. Throws nothing fatal to the caller path that
- * matters — the route still returns 200; errors are logged here.
+ * Process one Telegram update. Errors are logged here; the route still 200s.
  */
 export async function handleContactUpdate(
   db: AnyPgDatabase,
@@ -116,19 +149,45 @@ export async function handleContactUpdate(
   }
 
   // ---- Client side ----
-  if (msg.text && msg.text.trim().startsWith("/start")) {
-    await tg(cfg, "sendMessage", {
-      chat_id: msg.chat.id,
-      text: GREETING,
-      parse_mode: "Markdown",
-    }).catch(() => {});
-    return;
+  const text = (msg.text ?? "").trim();
+
+  // Slash-command quick replies (/start, /help, /listings, …)
+  if (text.startsWith("/")) {
+    const cmd = text.split(/\s+/)[0].toLowerCase().replace(/@.*$/, "");
+    const reply = COMMANDS[cmd];
+    if (reply) {
+      await tg(cfg, "sendMessage", {
+        chat_id: msg.chat.id,
+        text: reply,
+        parse_mode: cmd === "/start" || cmd === "/help" ? "Markdown" : undefined,
+        disable_web_page_preview: true,
+      }).catch(() => {});
+      return;
+    }
+  }
+
+  // History for this chat: drives both first-contact detection and flood-guard.
+  const history = await db
+    .select({ createdAt: contactThreads.createdAt })
+    .from(contactThreads)
+    .where(eq(contactThreads.clientChatId, msg.chat.id));
+  const firstContact = history.length === 0;
+  const cutoff = new Date(Date.now() - FLOOD_WINDOW_MS);
+  const recent = history.filter((h) => h.createdAt > cutoff).length;
+  if (recent >= FLOOD_MAX) return; // silently drop floods; owner already alerted by earlier msgs
+
+  if (firstContact) {
+    try {
+      await createTelegramLead(db, msg, msg.from);
+    } catch (err) {
+      console.error("[contact-bot] lead create failed:", (err as Error).message);
+    }
   }
 
   const uname = msg.from.username ? `@${msg.from.username}` : "—";
   const header =
     `📩 *Новый контакт с сайта*\n` +
-    `От: ${fullName(msg.from)} (${uname}, id \`${msg.from.id}\`)\n` +
+    `От: ${fullName(msg.from)} (${uname}, id \`${msg.from.id}\`)${firstContact ? " · 🆕 лид заведён" : ""}\n` +
     `↩️ Ответь reply на сообщение ниже.`;
 
   try {
@@ -150,5 +209,40 @@ export async function handleContactUpdate(
     console.error("[contact-bot] forward to owner failed:", (err as Error).message);
   }
 
-  await tg(cfg, "sendMessage", { chat_id: msg.chat.id, text: CLIENT_ACK }).catch(() => {});
+  // Warmer first-touch: greet on the first message, plain ack afterwards.
+  await tg(cfg, "sendMessage", {
+    chat_id: msg.chat.id,
+    text: firstContact ? GREETING : CLIENT_ACK,
+    parse_mode: firstContact ? "Markdown" : undefined,
+    disable_web_page_preview: true,
+  }).catch(() => {});
+}
+
+/**
+ * Health probe for the lead channel (called by a daily Vercel cron). Pings the
+ * owner via the bot only when something is wrong, so a silent webhook failure
+ * — the most expensive class of bug for an agency — surfaces within a day.
+ */
+export async function contactSelfCheck(
+  cfg: ContactBotConfig,
+  expectedUrl: string,
+): Promise<{ healthy: boolean; problems: string[] }> {
+  const info = (await tg(cfg, "getWebhookInfo", {})) as {
+    url?: string;
+    last_error_message?: string;
+    pending_update_count?: number;
+  };
+  const problems: string[] = [];
+  if (info.url !== expectedUrl) problems.push(`url: ${info.url || "(none)"} ≠ ${expectedUrl}`);
+  if (info.last_error_message) problems.push(`last_error: ${info.last_error_message}`);
+  if ((info.pending_update_count ?? 0) > 20) problems.push(`pending: ${info.pending_update_count}`);
+
+  if (problems.length) {
+    await tg(cfg, "sendMessage", {
+      chat_id: cfg.ownerId,
+      text: `🔴 *contact-bot webhook нездоров*\n${problems.join("\n")}`,
+      parse_mode: "Markdown",
+    }).catch(() => {});
+  }
+  return { healthy: problems.length === 0, problems };
 }
