@@ -357,3 +357,13 @@ export const contactThreads = pgTable("contact_threads", {
 });
 
 export type ContactThreadRow = typeof contactThreads.$inferSelect;
+
+/**
+ * Idempotency guard for the webhook: Telegram redelivers the same update_id if
+ * we don't 200 in time, so we record each processed id and skip duplicates
+ * (prevents a double-forward / double-lead on retry).
+ */
+export const processedUpdates = pgTable("processed_updates", {
+  updateId: bigint("update_id", { mode: "number" }).primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});

@@ -17,8 +17,8 @@
  *
  * See memory project_contact_bot_and_messenger_links.
  */
-import { and, eq, gte } from "drizzle-orm";
-import { contactThreads } from "../db/schema";
+import { eq } from "drizzle-orm";
+import { contactThreads, processedUpdates } from "../db/schema";
 import { createLead } from "./crm";
 import type { AnyPgDatabase } from "./load";
 
@@ -113,6 +113,16 @@ export async function handleContactUpdate(
   update: TgUpdate,
   cfg: ContactBotConfig,
 ): Promise<void> {
+  // Idempotency: skip if we've already processed this update_id (Telegram retry).
+  if (update.update_id != null) {
+    const inserted = await db
+      .insert(processedUpdates)
+      .values({ updateId: update.update_id })
+      .onConflictDoNothing()
+      .returning({ updateId: processedUpdates.updateId });
+    if (inserted.length === 0) return; // duplicate delivery
+  }
+
   const msg = update.message;
   if (!msg || !msg.from || msg.from.is_bot) return;
 

@@ -28,6 +28,7 @@ __export(schema_exports, {
   objectPhotos: () => objectPhotos,
   objects: () => objects,
   pipelines: () => pipelines,
+  processedUpdates: () => processedUpdates,
   projectUnits: () => projectUnits,
   stages: () => stages,
   users: () => users
@@ -297,6 +298,10 @@ var contactThreads = pgTable("contact_threads", {
   // message_id in owner chat
   clientChatId: bigint("client_chat_id", { mode: "number" }).notNull(),
   clientLabel: text("client_label"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+});
+var processedUpdates = pgTable("processed_updates", {
+  updateId: bigint("update_id", { mode: "number" }).primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
 
@@ -1302,6 +1307,10 @@ async function createTelegramLead(db2, msg, user) {
   });
 }
 async function handleContactUpdate(db2, update, cfg) {
+  if (update.update_id != null) {
+    const inserted = await db2.insert(processedUpdates).values({ updateId: update.update_id }).onConflictDoNothing().returning({ updateId: processedUpdates.updateId });
+    if (inserted.length === 0) return;
+  }
   const msg = update.message;
   if (!msg || !msg.from || msg.from.is_bot) return;
   if (msg.from.id === cfg.ownerId) {
