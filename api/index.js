@@ -19,6 +19,7 @@ import "dotenv/config";
 var schema_exports = {};
 __export(schema_exports, {
   contacts: () => contacts,
+  leadEvents: () => leadEvents,
   leadNotes: () => leadNotes,
   leadTasks: () => leadTasks,
   leads: () => leads,
@@ -274,6 +275,19 @@ var leadTasks = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
   },
   (t) => ({ leadIdx: index("lead_tasks_lead_idx").on(t.leadId) })
+);
+var leadEvents = pgTable(
+  "lead_events",
+  {
+    id: serial("id").primaryKey(),
+    leadId: integer("lead_id").notNull().references(() => leads.id, { onDelete: "cascade" }),
+    type: text("type").notNull(),
+    // created | stage
+    fromStage: text("from_stage"),
+    toStage: text("to_stage"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({ leadIdx: index("lead_events_lead_idx").on(t.leadId) })
 );
 
 // src/db/connect.ts
@@ -1036,6 +1050,19 @@ async function createLead(db2, input) {
     if (input.note?.trim()) {
       await tx.insert(leadNotes).values({ leadId: lead.id, text: input.note.trim() });
     }
+    await tx.insert(leadEvents).values({
+      leadId: lead.id,
+      type: "created",
+      toStage: stage?.name ?? null
+    });
+    const due = /* @__PURE__ */ new Date();
+    due.setUTCDate(due.getUTCDate() + 1);
+    due.setUTCHours(3, 0, 0, 0);
+    await tx.insert(leadTasks).values({
+      leadId: lead.id,
+      title: "\u{1F4DE} \u0421\u0432\u044F\u0437\u0430\u0442\u044C\u0441\u044F \u0441 \u043B\u0438\u0434\u043E\u043C (\u0430\u0432\u0442\u043E)",
+      dueAt: due
+    });
     return {
       leadId: lead.id,
       contactId: contact.id,
@@ -1099,13 +1126,14 @@ async function getLead(db2, id) {
     stageKey: stages.key
   }).from(leads).leftJoin(contacts, eq3(leads.contactId, contacts.id)).leftJoin(pipelines, eq3(leads.pipelineId, pipelines.id)).leftJoin(stages, eq3(leads.stageId, stages.id)).where(eq3(leads.id, id));
   if (!row) return null;
-  const [notes, tasks, pipe] = await Promise.all([
+  const [notes, tasks, events, pipe] = await Promise.all([
     db2.select().from(leadNotes).where(eq3(leadNotes.leadId, id)).orderBy(desc(leadNotes.createdAt)),
     db2.select().from(leadTasks).where(eq3(leadTasks.leadId, id)).orderBy(asc(leadTasks.done), asc(leadTasks.createdAt)),
+    db2.select().from(leadEvents).where(eq3(leadEvents.leadId, id)).orderBy(desc(leadEvents.createdAt)),
     row.pipelineKey ? listPipelines(db2) : Promise.resolve([])
   ]);
   const stagesForPipe = pipe.find((p) => p.key === row.pipelineKey)?.stages ?? [];
-  return { ...row, notes, tasks, stages: stagesForPipe };
+  return { ...row, notes, tasks, events, stages: stagesForPipe };
 }
 async function addNote(db2, leadId, text2) {
   if (!text2.trim()) return null;
@@ -1165,14 +1193,22 @@ async function updateLead(db2, id, patch) {
   if (!lead) return null;
   const set = { updatedAt: /* @__PURE__ */ new Date() };
   if (patch.status) set.status = patch.status;
+  let stageEvent = null;
   if (patch.stageKey && lead.pipelineId != null) {
     const [st] = await db2.select().from(stages).where(and(eq3(stages.pipelineId, lead.pipelineId), eq3(stages.key, patch.stageKey)));
     if (st) {
       set.stageId = st.id;
       set.status = st.isWon ? "won" : st.isLost ? "lost" : "open";
+      if (st.id !== lead.stageId) {
+        const [old] = lead.stageId ? await db2.select().from(stages).where(eq3(stages.id, lead.stageId)) : [];
+        stageEvent = { fromStage: old?.name ?? null, toStage: st.name };
+      }
     }
   }
   const [row] = await db2.update(leads).set(set).where(eq3(leads.id, id)).returning({ id: leads.id });
+  if (row && stageEvent) {
+    await db2.insert(leadEvents).values({ leadId: id, type: "stage", ...stageEvent });
+  }
   return row ?? null;
 }
 

@@ -315,5 +315,24 @@ export const leadTasks = pgTable(
   (t) => ({ leadIdx: index("lead_tasks_lead_idx").on(t.leadId) }),
 );
 
+/**
+ * Lead activity timeline — stage transitions (and creation), so the card can
+ * show when the lead moved and how long it sits on the current stage.
+ */
+export const leadEvents = pgTable(
+  "lead_events",
+  {
+    id: serial("id").primaryKey(),
+    leadId: integer("lead_id")
+      .notNull()
+      .references(() => leads.id, { onDelete: "cascade" }),
+    type: text("type").notNull(), // created | stage
+    fromStage: text("from_stage"),
+    toStage: text("to_stage"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ leadIdx: index("lead_events_lead_idx").on(t.leadId) }),
+);
+
 export type LeadRow = typeof leads.$inferSelect;
 export type LeadInsert = typeof leads.$inferInsert;

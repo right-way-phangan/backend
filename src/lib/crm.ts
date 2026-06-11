@@ -4,7 +4,7 @@
  * contact + lead + first note, routed into a pipeline/stage.
  */
 import { eq, and, asc, desc } from "drizzle-orm";
-import { pipelines, stages, contacts, leads, leadNotes, leadTasks } from "../db/schema";
+import { pipelines, stages, contacts, leads, leadNotes, leadTasks, leadEvents } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
 
 const PIPELINES = [
@@ -100,6 +100,23 @@ export async function createLead(
       await tx.insert(leadNotes).values({ leadId: lead.id, text: input.note.trim() });
     }
 
+    await tx.insert(leadEvents).values({
+      leadId: lead.id,
+      type: "created",
+      toStage: stage?.name ?? null,
+    });
+
+    // Default follow-up: every new lead gets a "contact them" task due tomorrow
+    // 10:00 office time (Phangan, UTC+7 → 03:00Z), so none sits "no tasks".
+    const due = new Date();
+    due.setUTCDate(due.getUTCDate() + 1);
+    due.setUTCHours(3, 0, 0, 0);
+    await tx.insert(leadTasks).values({
+      leadId: lead.id,
+      title: "📞 Связаться с лидом (авто)",
+      dueAt: due,
+    });
+
     return {
       leadId: lead.id,
       contactId: contact.id,
@@ -189,13 +206,14 @@ export async function getLead(db: AnyPgDatabase, id: number) {
     .where(eq(leads.id, id));
   if (!row) return null;
 
-  const [notes, tasks, pipe] = await Promise.all([
+  const [notes, tasks, events, pipe] = await Promise.all([
     db.select().from(leadNotes).where(eq(leadNotes.leadId, id)).orderBy(desc(leadNotes.createdAt)),
     db.select().from(leadTasks).where(eq(leadTasks.leadId, id)).orderBy(asc(leadTasks.done), asc(leadTasks.createdAt)),
+    db.select().from(leadEvents).where(eq(leadEvents.leadId, id)).orderBy(desc(leadEvents.createdAt)),
     row.pipelineKey ? listPipelines(db) : Promise.resolve([]),
   ]);
   const stagesForPipe = pipe.find((p) => p.key === row.pipelineKey)?.stages ?? [];
-  return { ...row, notes, tasks, stages: stagesForPipe };
+  return { ...row, notes, tasks, events, stages: stagesForPipe };
 }
 
 export async function addNote(db: AnyPgDatabase, leadId: number, text: string) {
@@ -309,6 +327,7 @@ export async function updateLead(
   if (!lead) return null;
   const set: Record<string, unknown> = { updatedAt: new Date() };
   if (patch.status) set.status = patch.status;
+  let stageEvent: { fromStage: string | null; toStage: string } | null = null;
   if (patch.stageKey && lead.pipelineId != null) {
     const [st] = await db
       .select()
@@ -317,8 +336,17 @@ export async function updateLead(
     if (st) {
       set.stageId = st.id;
       set.status = st.isWon ? "won" : st.isLost ? "lost" : "open";
+      if (st.id !== lead.stageId) {
+        const [old] = lead.stageId
+          ? await db.select().from(stages).where(eq(stages.id, lead.stageId))
+          : [];
+        stageEvent = { fromStage: old?.name ?? null, toStage: st.name };
+      }
     }
   }
   const [row] = await db.update(leads).set(set).where(eq(leads.id, id)).returning({ id: leads.id });
+  if (row && stageEvent) {
+    await db.insert(leadEvents).values({ leadId: id, type: "stage", ...stageEvent });
+  }
   return row ?? null;
 }
