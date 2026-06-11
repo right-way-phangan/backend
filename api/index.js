@@ -1057,14 +1057,16 @@ async function createLead(db2, input) {
       type: "created",
       toStage: stage?.name ?? null
     });
-    const due = /* @__PURE__ */ new Date();
-    due.setUTCDate(due.getUTCDate() + 1);
-    due.setUTCHours(3, 0, 0, 0);
-    await tx.insert(leadTasks).values({
-      leadId: lead.id,
-      title: "\u{1F4DE} \u0421\u0432\u044F\u0437\u0430\u0442\u044C\u0441\u044F \u0441 \u043B\u0438\u0434\u043E\u043C (\u0430\u0432\u0442\u043E)",
-      dueAt: due
-    });
+    if (input.autoTask !== false) {
+      const due = /* @__PURE__ */ new Date();
+      due.setUTCDate(due.getUTCDate() + 1);
+      due.setUTCHours(3, 0, 0, 0);
+      await tx.insert(leadTasks).values({
+        leadId: lead.id,
+        title: "\u{1F4DE} \u0421\u0432\u044F\u0437\u0430\u0442\u044C\u0441\u044F \u0441 \u043B\u0438\u0434\u043E\u043C (\u0430\u0432\u0442\u043E)",
+        dueAt: due
+      });
+    }
     return {
       leadId: lead.id,
       contactId: contact.id,

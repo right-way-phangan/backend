@@ -44,6 +44,8 @@ export interface NewLeadInput {
   rwNumber?: string;
   source?: string;
   kind?: string;
+  /** default true; bulk import passes false to avoid flooding tomorrow's tasks */
+  autoTask?: boolean;
 }
 
 export interface CreateLeadResult {
@@ -108,14 +110,16 @@ export async function createLead(
 
     // Default follow-up: every new lead gets a "contact them" task due tomorrow
     // 10:00 office time (Phangan, UTC+7 → 03:00Z), so none sits "no tasks".
-    const due = new Date();
-    due.setUTCDate(due.getUTCDate() + 1);
-    due.setUTCHours(3, 0, 0, 0);
-    await tx.insert(leadTasks).values({
-      leadId: lead.id,
-      title: "📞 Связаться с лидом (авто)",
-      dueAt: due,
-    });
+    if (input.autoTask !== false) {
+      const due = new Date();
+      due.setUTCDate(due.getUTCDate() + 1);
+      due.setUTCHours(3, 0, 0, 0);
+      await tx.insert(leadTasks).values({
+        leadId: lead.id,
+        title: "📞 Связаться с лидом (авто)",
+        dueAt: due,
+      });
+    }
 
     return {
       leadId: lead.id,
