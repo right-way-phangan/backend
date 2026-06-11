@@ -18,6 +18,7 @@ import "dotenv/config";
 // src/db/schema.ts
 var schema_exports = {};
 __export(schema_exports, {
+  contactThreads: () => contactThreads,
   contacts: () => contacts,
   leadEvents: () => leadEvents,
   leadNotes: () => leadNotes,
@@ -291,6 +292,13 @@ var leadEvents = pgTable(
   },
   (t) => ({ leadIdx: index("lead_events_lead_idx").on(t.leadId) })
 );
+var contactThreads = pgTable("contact_threads", {
+  ownerMsgId: bigint("owner_msg_id", { mode: "number" }).primaryKey(),
+  // message_id in owner chat
+  clientChatId: bigint("client_chat_id", { mode: "number" }).notNull(),
+  clientLabel: text("client_label"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+});
 
 // src/db/connect.ts
 async function createDb() {
@@ -1249,9 +1257,96 @@ async function verifyLogin(db2, email, password) {
   return { id: u2.id, email: u2.email, name: u2.name, role: u2.role };
 }
 
+// src/lib/contact-bot.ts
+import { eq as eq5 } from "drizzle-orm";
+var GREETING = "\u{1F334} *Right Way Phangan*\n\nHi! Send your question about land, villas or houses on Koh Phangan \u2014 a real person will reply here. Feel free to share your budget, area or a listing link.\n\n\u041F\u0440\u0438\u0432\u0435\u0442! \u041D\u0430\u043F\u0438\u0448\u0438\u0442\u0435 \u0432\u0430\u0448 \u0432\u043E\u043F\u0440\u043E\u0441 \u043F\u043E \u0437\u0435\u043C\u043B\u0435, \u0432\u0438\u043B\u043B\u0430\u043C \u0438 \u0434\u043E\u043C\u0430\u043C \u043D\u0430 \u041F\u0430\u043D\u0433\u0430\u043D\u0435 \u2014 \u043E\u0442\u0432\u0435\u0442\u0438\u0442 \u0436\u0438\u0432\u043E\u0439 \u0447\u0435\u043B\u043E\u0432\u0435\u043A. \u041C\u043E\u0436\u043D\u043E \u0441\u0440\u0430\u0437\u0443 \u0443\u043A\u0430\u0437\u0430\u0442\u044C \u0431\u044E\u0434\u0436\u0435\u0442, \u0440\u0430\u0439\u043E\u043D \u0438\u043B\u0438 \u0441\u0441\u044B\u043B\u043A\u0443 \u043D\u0430 \u043E\u0431\u044A\u0435\u043A\u0442.";
+var CLIENT_ACK = "\u0421\u043F\u0430\u0441\u0438\u0431\u043E! \u0421\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043E \u2014 \u043E\u0442\u0432\u0435\u0442\u0438\u043C \u0437\u0434\u0435\u0441\u044C \u0436\u0435.\n\nThanks! We've got your message and will reply right here.";
+async function tg(cfg, method, body) {
+  const res = await fetch(`https://api.telegram.org/bot${cfg.token}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(`${method} failed: ${data.description ?? res.status}`);
+  return data.result;
+}
+function fullName(u2) {
+  if (!u2) return "?";
+  return [u2.first_name, u2.last_name].filter(Boolean).join(" ") || (u2.username ?? "?");
+}
+async function handleContactUpdate(db2, update, cfg) {
+  const msg = update.message;
+  if (!msg || !msg.from || msg.from.is_bot) return;
+  if (msg.from.id === cfg.ownerId) {
+    if (!msg.reply_to_message) return;
+    const rows = await db2.select().from(contactThreads).where(eq5(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
+    const thread = rows[0];
+    if (!thread) {
+      await tg(cfg, "sendMessage", {
+        chat_id: cfg.ownerId,
+        text: "\u26A0\uFE0F \u041D\u0435 \u043D\u0430\u0448\u0451\u043B, \u043A\u043E\u043C\u0443 \u044D\u0442\u043E \u0430\u0434\u0440\u0435\u0441\u043E\u0432\u0430\u043D\u043E \u2014 \u0441\u0434\u0435\u043B\u0430\u0439 reply \u0438\u043C\u0435\u043D\u043D\u043E \u043D\u0430 \u043F\u0435\u0440\u0435\u0441\u043B\u0430\u043D\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u043A\u043B\u0438\u0435\u043D\u0442\u0430."
+      }).catch(() => {
+      });
+      return;
+    }
+    try {
+      await tg(cfg, "copyMessage", {
+        chat_id: thread.clientChatId,
+        from_chat_id: msg.chat.id,
+        message_id: msg.message_id
+      });
+      await tg(cfg, "sendMessage", { chat_id: cfg.ownerId, text: "\u2705 \u041E\u0442\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u043E \u043A\u043B\u0438\u0435\u043D\u0442\u0443." }).catch(() => {
+      });
+    } catch (err) {
+      await tg(cfg, "sendMessage", {
+        chat_id: cfg.ownerId,
+        text: `\u26A0\uFE0F \u041D\u0435 \u0434\u043E\u0441\u0442\u0430\u0432\u043B\u0435\u043D\u043E \u043A\u043B\u0438\u0435\u043D\u0442\u0443: ${err.message}`
+      }).catch(() => {
+      });
+    }
+    return;
+  }
+  if (msg.text && msg.text.trim().startsWith("/start")) {
+    await tg(cfg, "sendMessage", {
+      chat_id: msg.chat.id,
+      text: GREETING,
+      parse_mode: "Markdown"
+    }).catch(() => {
+    });
+    return;
+  }
+  const uname = msg.from.username ? `@${msg.from.username}` : "\u2014";
+  const header = `\u{1F4E9} *\u041D\u043E\u0432\u044B\u0439 \u043A\u043E\u043D\u0442\u0430\u043A\u0442 \u0441 \u0441\u0430\u0439\u0442\u0430*
+\u041E\u0442: ${fullName(msg.from)} (${uname}, id \`${msg.from.id}\`)
+\u21A9\uFE0F \u041E\u0442\u0432\u0435\u0442\u044C reply \u043D\u0430 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u043D\u0438\u0436\u0435.`;
+  try {
+    await tg(cfg, "sendMessage", { chat_id: cfg.ownerId, text: header, parse_mode: "Markdown" });
+    const copy = await tg(cfg, "copyMessage", {
+      chat_id: cfg.ownerId,
+      from_chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    await db2.insert(contactThreads).values({
+      ownerMsgId: copy.message_id,
+      clientChatId: msg.chat.id,
+      clientLabel: `${fullName(msg.from)} ${uname}`.trim()
+    }).onConflictDoNothing();
+  } catch (err) {
+    console.error("[contact-bot] forward to owner failed:", err.message);
+  }
+  await tg(cfg, "sendMessage", { chat_id: msg.chat.id, text: CLIENT_ACK }).catch(() => {
+  });
+}
+
 // src/api/app.ts
 var API_TOKEN = process.env.API_TOKEN;
 var ON_VERCEL = !!process.env.VERCEL;
+var CONTACT_BOT = process.env.TG_CONTACT_BOT_TOKEN ? {
+  token: process.env.TG_CONTACT_BOT_TOKEN,
+  ownerId: Number(process.env.TG_CONTACT_OWNER_ID ?? 0)
+} : null;
+var CONTACT_WEBHOOK_SECRET = process.env.TG_CONTACT_WEBHOOK_SECRET;
 var { db, driver, applyMigrations } = await createDb();
 if (!ON_VERCEL) {
   await applyMigrations();
@@ -1261,7 +1356,7 @@ var app = new Hono();
 app.use("/*", cors());
 if (API_TOKEN) {
   app.use("/*", async (c, next) => {
-    if (c.req.path === "/health") return next();
+    if (c.req.path === "/health" || c.req.path.startsWith("/telegram/")) return next();
     if (c.req.header("authorization") !== `Bearer ${API_TOKEN}`) {
       return c.json({ error: "unauthorized" }, 401);
     }
@@ -1269,6 +1364,19 @@ if (API_TOKEN) {
   });
 }
 app.get("/health", (c) => c.json({ ok: true, driver }));
+app.post("/telegram/contact", async (c) => {
+  if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
+  if (CONTACT_WEBHOOK_SECRET && c.req.header("x-telegram-bot-api-secret-token") !== CONTACT_WEBHOOK_SECRET) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  try {
+    const update = await c.req.json();
+    await handleContactUpdate(db, update, CONTACT_BOT);
+  } catch (err) {
+    console.error("[POST /telegram/contact]", err.message);
+  }
+  return c.json({ ok: true });
+});
 app.post("/auth/login", async (c) => {
   const { email, password } = await c.req.json();
   const user = await verifyLogin(db, String(email ?? ""), String(password ?? ""));

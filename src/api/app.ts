@@ -23,9 +23,19 @@ import {
   listEvents,
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
+import { handleContactUpdate, type ContactBotConfig } from "../lib/contact-bot";
 
 const API_TOKEN = process.env.API_TOKEN;
 const ON_VERCEL = !!process.env.VERCEL;
+
+// Public contact bot (@rightwayphangan_bot) — webhook lives at /telegram/contact.
+const CONTACT_BOT: ContactBotConfig | null = process.env.TG_CONTACT_BOT_TOKEN
+  ? {
+      token: process.env.TG_CONTACT_BOT_TOKEN,
+      ownerId: Number(process.env.TG_CONTACT_OWNER_ID ?? 0),
+    }
+  : null;
+const CONTACT_WEBHOOK_SECRET = process.env.TG_CONTACT_WEBHOOK_SECRET;
 
 const { db, driver, applyMigrations } = await createDb();
 // On Vercel each cold start would otherwise re-run migrate+seed; do them once at
@@ -42,7 +52,9 @@ export const app = new Hono();
 app.use("/*", cors());
 if (API_TOKEN) {
   app.use("/*", async (c, next) => {
-    if (c.req.path === "/health") return next();
+    // /health is public; the Telegram webhook authenticates via its own secret
+    // header (Telegram can't send a Bearer token), validated in the route below.
+    if (c.req.path === "/health" || c.req.path.startsWith("/telegram/")) return next();
     if (c.req.header("authorization") !== `Bearer ${API_TOKEN}`) {
       return c.json({ error: "unauthorized" }, 401);
     }
@@ -51,6 +63,29 @@ if (API_TOKEN) {
 }
 
 app.get("/health", (c) => c.json({ ok: true, driver }));
+
+/**
+ * Telegram webhook for the public contact bot (@rightwayphangan_bot).
+ * Auth = the secret token Telegram echoes in X-Telegram-Bot-Api-Secret-Token
+ * (set via setWebhook). Always returns 200 after best-effort handling so
+ * Telegram doesn't retry-storm; errors are logged inside the handler.
+ */
+app.post("/telegram/contact", async (c) => {
+  if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
+  if (
+    CONTACT_WEBHOOK_SECRET &&
+    c.req.header("x-telegram-bot-api-secret-token") !== CONTACT_WEBHOOK_SECRET
+  ) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  try {
+    const update = await c.req.json();
+    await handleContactUpdate(db, update, CONTACT_BOT);
+  } catch (err) {
+    console.error("[POST /telegram/contact]", (err as Error).message);
+  }
+  return c.json({ ok: true });
+});
 
 /** Verify CRM user credentials. Web issues its own session cookie on success. */
 app.post("/auth/login", async (c) => {

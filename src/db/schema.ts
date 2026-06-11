@@ -337,3 +337,23 @@ export const leadEvents = pgTable(
 
 export type LeadRow = typeof leads.$inferSelect;
 export type LeadInsert = typeof leads.$inferInsert;
+
+// ============================================================
+// Contact bot (public @rightwayphangan_bot) — webhook on this API.
+// ============================================================
+
+/**
+ * Maps the message copied into the OWNER chat → the client chat it came from,
+ * so the owner can reply by replying to that message and the relay finds its
+ * target. Replaces the polling bot's local bot/contact_threads.json now that
+ * the bot runs serverless here (no local disk, no MacBook dependency).
+ * See memory project_contact_bot_and_messenger_links.
+ */
+export const contactThreads = pgTable("contact_threads", {
+  ownerMsgId: bigint("owner_msg_id", { mode: "number" }).primaryKey(), // message_id in owner chat
+  clientChatId: bigint("client_chat_id", { mode: "number" }).notNull(),
+  clientLabel: text("client_label"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type ContactThreadRow = typeof contactThreads.$inferSelect;
