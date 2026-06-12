@@ -20,7 +20,7 @@ import { createObject, updateObject, addObjectPhotos, ObjectInputError } from ".
 import {
   createLead, listLeads, listPipelines, updateLead, seedCrm,
   getLead, addNote, addTask, updateTask, listTasks, updateLeadContact, deleteLead,
-  listEvents,
+  listEvents, listContacts,
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
 import {
@@ -274,6 +274,12 @@ app.get("/tasks", async (c) => {
   return c.json(await listTasks(db, { done, limit }));
 });
 
+/** Contact book — contacts with lead counters (total/open) + latest lead id. */
+app.get("/contacts", async (c) => {
+  const limit = Math.min(Number(c.req.query("limit")) || 1000, 2000);
+  return c.json(await listContacts(db, limit));
+});
+
 // ─── Blog articles (content pipeline + review-gate) ───
 
 /** List articles. Query: ?status=pending|published|rejected &lang=en|ru */
@@ -290,9 +296,11 @@ app.get("/articles/pending-count", async (c) => {
   return c.json({ count: await countPending(db, lang) });
 });
 
-/** Public blog fetch by slug (only published is served publicly; admin reads by id). */
+/** Public blog fetch by slug (only published is served publicly; admin reads by id).
+ *  ?lang=en|ru picks the language version of the EN+RU pair sharing the slug. */
 app.get("/articles/slug/:slug", async (c) => {
-  const row = await getArticleBySlug(db, c.req.param("slug"));
+  const lang = c.req.query("lang") || undefined;
+  const row = await getArticleBySlug(db, c.req.param("slug"), lang);
   return row ? c.json(row) : c.json({ error: "not found" }, 404);
 });
 

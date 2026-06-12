@@ -1437,8 +1437,10 @@ async function getArticleById(db2, id) {
   const [row] = await db2.select().from(articles).where(eq5(articles.id, id)).limit(1);
   return row ?? null;
 }
-async function getArticleBySlug(db2, slug) {
-  const [row] = await db2.select().from(articles).where(eq5(articles.slug, slug)).limit(1);
+async function getArticleBySlug(db2, slug, lang) {
+  const conds = [eq5(articles.slug, slug)];
+  if (lang) conds.push(eq5(articles.lang, lang));
+  const [row] = await db2.select().from(articles).where(and2(...conds)).limit(1);
   return row ?? null;
 }
 async function countPending(db2, lang) {
@@ -1823,7 +1825,8 @@ app.get("/articles/pending-count", async (c) => {
   return c.json({ count: await countPending(db, lang) });
 });
 app.get("/articles/slug/:slug", async (c) => {
-  const row = await getArticleBySlug(db, c.req.param("slug"));
+  const lang = c.req.query("lang") || void 0;
+  const row = await getArticleBySlug(db, c.req.param("slug"), lang);
   return row ? c.json(row) : c.json({ error: "not found" }, 404);
 });
 app.get("/articles/:id", async (c) => {
