@@ -1267,6 +1267,18 @@ async function updateTask(db2, taskId, patch) {
   const [t] = await db2.update(leadTasks).set(set).where(eq3(leadTasks.id, taskId)).returning({ id: leadTasks.id });
   return t ?? null;
 }
+async function listContacts(db2, limit = 1e3) {
+  return db2.select({
+    id: contacts.id,
+    name: contacts.firstName,
+    email: contacts.email,
+    phone: contacts.phone,
+    createdAt: contacts.createdAt,
+    leadsCount: sql2`count(${leads.id})::int`,
+    openLeads: sql2`(count(${leads.id}) filter (where ${leads.status} = 'open'))::int`,
+    lastLeadId: sql2`max(${leads.id})`
+  }).from(contacts).leftJoin(leads, eq3(leads.contactId, contacts.id)).groupBy(contacts.id).orderBy(asc(contacts.firstName), asc(contacts.id)).limit(limit);
+}
 async function listTasks(db2, opts = {}) {
   const { done = false, limit = 300 } = opts;
   return db2.select({
@@ -1813,6 +1825,10 @@ app.get("/tasks", async (c) => {
   const done = c.req.query("done") === "1";
   const limit = Math.min(Number(c.req.query("limit")) || 300, 1e3);
   return c.json(await listTasks(db, { done, limit }));
+});
+app.get("/contacts", async (c) => {
+  const limit = Math.min(Number(c.req.query("limit")) || 1e3, 2e3);
+  return c.json(await listContacts(db, limit));
 });
 app.get("/articles", async (c) => {
   const status = c.req.query("status");

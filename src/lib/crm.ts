@@ -335,6 +335,29 @@ export async function updateTask(
 }
 
 /**
+ * The contact book — every contact with lead counters (total / open) and the
+ * latest lead id, so the UI can jump person → deal. Name-ascending, NULLs last.
+ */
+export async function listContacts(db: AnyPgDatabase, limit = 1000) {
+  return db
+    .select({
+      id: contacts.id,
+      name: contacts.firstName,
+      email: contacts.email,
+      phone: contacts.phone,
+      createdAt: contacts.createdAt,
+      leadsCount: sql<number>`count(${leads.id})::int`,
+      openLeads: sql<number>`(count(${leads.id}) filter (where ${leads.status} = 'open'))::int`,
+      lastLeadId: sql<number | null>`max(${leads.id})`,
+    })
+    .from(contacts)
+    .leftJoin(leads, eq(leads.contactId, contacts.id))
+    .groupBy(contacts.id)
+    .orderBy(asc(contacts.firstName), asc(contacts.id))
+    .limit(limit);
+}
+
+/**
  * Tasks across all leads, joined with lead + contact — the unified tasks
  * page ("what do I do today"). Open by default; PG sorts NULL dueAt last.
  */
