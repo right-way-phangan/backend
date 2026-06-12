@@ -22,10 +22,13 @@ DC="docker compose -f docker-compose.vps.yml --env-file .env.vps"
 $DC exec api npm run migrate:amocrm -- --dry  # сухой прогон: что загрузится / отсеется
 $DC exec api npm run migrate:amocrm           # объекты → ~141 шт + ~60 off-plan юнитов в project_units
 $DC exec api npm run migrate:leads -- --dry --tag=website   # проверить срез RW
-$DC exec api npm run migrate:leads -- --tag=website         # ТОЛЬКО лиды Right Way (не legacy Circle!)
+$DC exec api npm run migrate:leads -- --tag=website         # лиды Right Way → рабочие воронки
+$DC exec api npm run migrate:leads -- --legacy --all-contacts --no-notes
+#   ^ решение 2026-06-11: legacy Circle (≈409 лидов) → воронка «Разбор (legacy)»
+#     (стадия «Разобрать», тег legacy-circle) + ВСЯ контактная книга amo (~412)
 ```
 > ⚠️ **Объекты.** Миграция применяет cut-over-фильтр (`lib/cutover.ts`): из ~203 элементов каталога грузятся **только реальные листинги (~141)**. Off-plan unit-подкарточки `RW-P####-N` (~60 шт) откладываются под будущую таблицу `project_units`; тест/sentinel-карточки (`ZZTEST-*`, «DELETE ME») отбрасываются. Сухой прогон печатает точную раскладку. Стрэй-карточку можно добить вручную: `migrate:amocrm -- --exclude=1412995,1412997`.
-> ⚠️ **Лиды.** Аккаунт amoCRM унаследован от Circle: из ~415 лидов лишь ~6 — Right Way. Всегда `--tag=website` (или `--since=YYYY-MM-DD`), иначе затащите 409 чужих лидов.
+> ⚠️ **Лиды.** Аккаунт amoCRM унаследован от Circle: из ~415 лидов лишь ~6 — Right Way. `--tag=website` кладёт их в рабочие воронки; `--legacy` — инверсия среза: всё остальное уходит в отдельную воронку «Разбор (legacy)» и НЕ засоряет рабочую доску. Оба прогона идемпотентны.
 
 ## 3. Переключить сайт (Vercel) и бота
 Vercel → Environment Variables (Production), затем redeploy:
