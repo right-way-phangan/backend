@@ -259,6 +259,7 @@ export const leads = pgTable(
     contactId: integer("contact_id").references(() => contacts.id, { onDelete: "set null" }),
     status: text("status").notNull().default("open"), // open | won | lost
     lostReason: text("lost_reason"), // why the deal was lost (price | changed-mind | competitor | no-reply | other:…)
+    dealValue: doublePrecision("deal_value"), // expected deal size, THB — pipeline money on the dashboard
     amoLeadId: bigint("amo_lead_id", { mode: "number" }).unique(), // migration traceability
     rwNumber: text("rw_number"), // object the inquiry is about, if any
     source: text("source"), // "object" | "contact"
@@ -357,6 +358,44 @@ export const contactThreads = pgTable("contact_threads", {
 });
 
 export type ContactThreadRow = typeof contactThreads.$inferSelect;
+
+// ============================================================
+// Blog / Journal articles — content pipeline with review-gate.
+// Claude writes a draft (status=pending) → Vladimir approves in /admin/articles
+// (status=published, goes live on /blog) or returns it (status=rejected + note).
+// Body is stored as markdown (source of truth, editable in admin); the public
+// blog renders it via a markdown→KbBlock converter so it matches the static
+// posts in web/src/content/blog.ts. See feedback_articles_telegram_approval.
+// ============================================================
+
+export const articles = pgTable(
+  "articles",
+  {
+    id: serial("id").primaryKey(),
+    slug: text("slug").notNull().unique(),
+    lang: text("lang").notNull().default("en"), // en → /blog · ru → /ru/blog
+    title: text("title").notNull(),
+    excerpt: text("excerpt").notNull(), // one-line summary: card + meta description
+    topic: text("topic").notNull().default("Guide"), // category chip
+    bodyMd: text("body_md").notNull(), // markdown source of truth
+    takeaways: text("takeaways").array(),
+    readMins: integer("read_mins"),
+    coverImage: text("cover_image"),
+    status: text("status").notNull().default("pending"), // pending | published | rejected
+    reviewerNote: text("reviewer_note"), // why returned for rework
+    createdBy: text("created_by").notNull().default("claude"),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    statusIdx: index("articles_status_idx").on(t.status),
+    langStatusIdx: index("articles_lang_status_idx").on(t.lang, t.status),
+  }),
+);
+
+export type ArticleRow = typeof articles.$inferSelect;
+export type ArticleInsert = typeof articles.$inferInsert;
 
 /**
  * Idempotency guard for the webhook: Telegram redelivers the same update_id if

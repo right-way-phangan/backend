@@ -18,6 +18,7 @@ import "dotenv/config";
 // src/db/schema.ts
 var schema_exports = {};
 __export(schema_exports, {
+  articles: () => articles,
   contactThreads: () => contactThreads,
   contacts: () => contacts,
   leadEvents: () => leadEvents,
@@ -232,6 +233,8 @@ var leads = pgTable(
     // open | won | lost
     lostReason: text("lost_reason"),
     // why the deal was lost (price | changed-mind | competitor | no-reply | other:…)
+    dealValue: doublePrecision("deal_value"),
+    // expected deal size, THB — pipeline money on the dashboard
     amoLeadId: bigint("amo_lead_id", { mode: "number" }).unique(),
     // migration traceability
     rwNumber: text("rw_number"),
@@ -300,6 +303,37 @@ var contactThreads = pgTable("contact_threads", {
   clientLabel: text("client_label"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
+var articles = pgTable(
+  "articles",
+  {
+    id: serial("id").primaryKey(),
+    slug: text("slug").notNull().unique(),
+    lang: text("lang").notNull().default("en"),
+    // en → /blog · ru → /ru/blog
+    title: text("title").notNull(),
+    excerpt: text("excerpt").notNull(),
+    // one-line summary: card + meta description
+    topic: text("topic").notNull().default("Guide"),
+    // category chip
+    bodyMd: text("body_md").notNull(),
+    // markdown source of truth
+    takeaways: text("takeaways").array(),
+    readMins: integer("read_mins"),
+    coverImage: text("cover_image"),
+    status: text("status").notNull().default("pending"),
+    // pending | published | rejected
+    reviewerNote: text("reviewer_note"),
+    // why returned for rework
+    createdBy: text("created_by").notNull().default("claude"),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({
+    statusIdx: index("articles_status_idx").on(t.status),
+    langStatusIdx: index("articles_lang_status_idx").on(t.lang, t.status)
+  })
+);
 var processedUpdates = pgTable("processed_updates", {
   updateId: bigint("update_id", { mode: "number" }).primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
@@ -1119,6 +1153,7 @@ async function listLeads(db2, limit = 500) {
     name: leads.name,
     status: leads.status,
     lostReason: leads.lostReason,
+    dealValue: leads.dealValue,
     rwNumber: leads.rwNumber,
     source: leads.source,
     kind: leads.kind,
@@ -1134,6 +1169,11 @@ async function listLeads(db2, limit = 500) {
     stageKey: stages.key,
     stageId: stages.id
   }).from(leads).leftJoin(contacts, eq3(leads.contactId, contacts.id)).leftJoin(pipelines, eq3(leads.pipelineId, pipelines.id)).leftJoin(stages, eq3(leads.stageId, stages.id)).orderBy(desc(leads.createdAt)).limit(limit);
+  const notesAgg = await db2.select({
+    leadId: leadNotes.leadId,
+    text: sql2`string_agg(${leadNotes.text}, ' ')`
+  }).from(leadNotes).groupBy(leadNotes.leadId);
+  const notesByLead = new Map(notesAgg.map((n) => [n.leadId, (n.text || "").slice(0, 1500)]));
   const lastEvent = await db2.select({
     leadId: leadEvents.leadId,
     last: sql2`max(${leadEvents.createdAt})`
@@ -1152,7 +1192,8 @@ async function listLeads(db2, limit = 500) {
     ...r,
     openTasks: byLead.get(r.id)?.open ?? 0,
     overdueTasks: byLead.get(r.id)?.overdue ?? 0,
-    stageSince: stageSinceByLead.get(r.id) ?? null
+    stageSince: stageSinceByLead.get(r.id) ?? null,
+    notesText: notesByLead.get(r.id) ?? ""
   }));
 }
 async function getLead(db2, id) {
@@ -1161,6 +1202,7 @@ async function getLead(db2, id) {
     name: leads.name,
     status: leads.status,
     lostReason: leads.lostReason,
+    dealValue: leads.dealValue,
     rwNumber: leads.rwNumber,
     source: leads.source,
     kind: leads.kind,
@@ -1256,6 +1298,13 @@ async function updateLead(db2, id, patch) {
   const set = { updatedAt: /* @__PURE__ */ new Date() };
   if (patch.status) set.status = patch.status;
   if (typeof patch.lostReason === "string") set.lostReason = patch.lostReason.trim() || null;
+  if (patch.dealValue !== void 0) {
+    const v = patch.dealValue === null ? null : Number(patch.dealValue);
+    set.dealValue = v != null && Number.isFinite(v) && v > 0 ? v : null;
+  }
+  if (Array.isArray(patch.tags)) {
+    set.tags = patch.tags.map((t) => String(t).trim()).filter(Boolean);
+  }
   let stageEvent = null;
   if (patch.stageKey && lead.pipelineId != null) {
     const [st] = await db2.select().from(stages).where(and(eq3(stages.pipelineId, lead.pipelineId), eq3(stages.key, patch.stageKey)));

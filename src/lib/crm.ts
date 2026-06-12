@@ -184,6 +184,7 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
       name: leads.name,
       status: leads.status,
       lostReason: leads.lostReason,
+      dealValue: leads.dealValue,
       rwNumber: leads.rwNumber,
       source: leads.source,
       kind: leads.kind,
@@ -205,6 +206,16 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
     .leftJoin(stages, eq(leads.stageId, stages.id))
     .orderBy(desc(leads.createdAt))
     .limit(limit);
+
+  // Notes concatenated per lead so the board search can look into them.
+  const notesAgg = await db
+    .select({
+      leadId: leadNotes.leadId,
+      text: sql<string>`string_agg(${leadNotes.text}, ' ')`,
+    })
+    .from(leadNotes)
+    .groupBy(leadNotes.leadId);
+  const notesByLead = new Map(notesAgg.map((n) => [n.leadId, (n.text || "").slice(0, 1500)]));
 
   // When the lead landed on its current stage (last event), for "days on stage".
   const lastEvent = await db
@@ -235,6 +246,7 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
     openTasks: byLead.get(r.id)?.open ?? 0,
     overdueTasks: byLead.get(r.id)?.overdue ?? 0,
     stageSince: stageSinceByLead.get(r.id) ?? null,
+    notesText: notesByLead.get(r.id) ?? "",
   }));
 }
 
@@ -246,6 +258,7 @@ export async function getLead(db: AnyPgDatabase, id: number) {
       name: leads.name,
       status: leads.status,
       lostReason: leads.lostReason,
+      dealValue: leads.dealValue,
       rwNumber: leads.rwNumber,
       source: leads.source,
       kind: leads.kind,
@@ -402,13 +415,26 @@ export async function listPipelines(db: AnyPgDatabase) {
 export async function updateLead(
   db: AnyPgDatabase,
   id: number,
-  patch: { stageKey?: string; status?: string; lostReason?: string },
+  patch: {
+    stageKey?: string;
+    status?: string;
+    lostReason?: string;
+    dealValue?: number | null;
+    tags?: string[];
+  },
 ): Promise<{ id: number } | null> {
   const [lead] = await db.select().from(leads).where(eq(leads.id, id));
   if (!lead) return null;
   const set: Record<string, unknown> = { updatedAt: new Date() };
   if (patch.status) set.status = patch.status;
   if (typeof patch.lostReason === "string") set.lostReason = patch.lostReason.trim() || null;
+  if (patch.dealValue !== undefined) {
+    const v = patch.dealValue === null ? null : Number(patch.dealValue);
+    set.dealValue = v != null && Number.isFinite(v) && v > 0 ? v : null;
+  }
+  if (Array.isArray(patch.tags)) {
+    set.tags = patch.tags.map((t) => String(t).trim()).filter(Boolean);
+  }
   let stageEvent: { fromStage: string | null; toStage: string } | null = null;
   if (patch.stageKey && lead.pipelineId != null) {
     const [st] = await db
