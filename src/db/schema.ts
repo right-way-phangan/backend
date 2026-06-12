@@ -125,6 +125,8 @@ export const objects = pgTable(
     ddStatus: text("dd_status"),
     ddDate: text("dd_date"),   // YYYY-MM-DD
     ddLawyer: text("dd_lawyer"), // кто дал вердикт — НЕ публичное поле
+    // Чек-лист L1 (V1–V7): {"V1": true, ...} — какие пункты закрыты. НЕ публичное.
+    ddChecklist: jsonb("dd_checklist").$type<Record<string, boolean>>(),
 
     // External
     driveFolder: text("drive_folder"),

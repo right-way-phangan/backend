@@ -406,7 +406,7 @@ const PATCHABLE = new Set<keyof ObjectInsert>([
   "bedrooms", "bathrooms", "buildYear", "condition",
   "reasonForSelling", "timeOnMarketMonths",
   // due diligence (admin /admin/dd)
-  "ddStatus", "ddDate", "ddLawyer",
+  "ddStatus", "ddDate", "ddLawyer", "ddChecklist",
 ]);
 
 /** Update whitelisted columns of an object by RW number. */

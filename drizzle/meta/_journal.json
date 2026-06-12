@@ -71,6 +71,13 @@
       "when": 1781261804764,
       "tag": "0009_thick_bloodstrike",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1781278559390,
+      "tag": "0010_reflective_stingray",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "objects" ADD COLUMN "dd_checklist" jsonb;

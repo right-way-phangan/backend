@@ -74,6 +74,7 @@ export interface RealEstateObject {
   ddStatus?: string;
   ddDate?: string;
   ddLawyer?: string;
+  ddChecklist?: Record<string, boolean>;
   driveFolder?: string;
   locationUrl?: string;
   lat?: number;
@@ -173,6 +174,7 @@ export function toDomain(
     ddStatus: u(row.ddStatus),
     ddDate: u(row.ddDate),
     ddLawyer: u(row.ddLawyer),
+    ddChecklist: u(row.ddChecklist),
     driveFolder: u(row.driveFolder),
     locationUrl: u(row.locationUrl),
     lat: u(row.lat),

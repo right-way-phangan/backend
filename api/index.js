@@ -135,6 +135,8 @@ var objects = pgTable(
     // YYYY-MM-DD
     ddLawyer: text("dd_lawyer"),
     // кто дал вердикт — НЕ публичное поле
+    // Чек-лист L1 (V1–V7): {"V1": true, ...} — какие пункты закрыты. НЕ публичное.
+    ddChecklist: jsonb("dd_checklist").$type(),
     // External
     driveFolder: text("drive_folder"),
     locationUrl: text("location_url"),
@@ -463,6 +465,7 @@ function toDomain(row, photos, docs) {
     ddStatus: u(row.ddStatus),
     ddDate: u(row.ddDate),
     ddLawyer: u(row.ddLawyer),
+    ddChecklist: u(row.ddChecklist),
     driveFolder: u(row.driveFolder),
     locationUrl: u(row.locationUrl),
     lat: u(row.lat),
@@ -1056,7 +1059,8 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   // due diligence (admin /admin/dd)
   "ddStatus",
   "ddDate",
-  "ddLawyer"
+  "ddLawyer",
+  "ddChecklist"
 ]);
 async function updateObject(db2, rwNumber, patch) {
   const set = { updatedAt: /* @__PURE__ */ new Date() };
