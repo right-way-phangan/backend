@@ -23,6 +23,10 @@ import {
   listEvents,
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
+import {
+  createArticle, listArticles, getArticleById, getArticleBySlug,
+  updateArticle, deleteArticle, countPending, ArticleInputError,
+} from "../lib/articles";
 import { handleContactUpdate, contactSelfCheck, type ContactBotConfig } from "../lib/contact-bot";
 
 const API_TOKEN = process.env.API_TOKEN;
@@ -260,4 +264,61 @@ app.patch("/tasks/:id", async (c) => {
   const { done } = await c.req.json();
   const res = await toggleTask(db, Number(c.req.param("id")), Boolean(done));
   return res ? c.json(res) : c.json({ error: "not found" }, 404);
+});
+
+// ─── Blog articles (content pipeline + review-gate) ───
+
+/** List articles. Query: ?status=pending|published|rejected &lang=en|ru */
+app.get("/articles", async (c) => {
+  const status = c.req.query("status") as "pending" | "published" | "rejected" | undefined;
+  const lang = c.req.query("lang") || undefined;
+  const data = await listArticles(db, { status, lang });
+  return c.json(data);
+});
+
+/** Count awaiting review — for the morning digest + admin badge. */
+app.get("/articles/pending-count", async (c) => {
+  const lang = c.req.query("lang") || undefined;
+  return c.json({ count: await countPending(db, lang) });
+});
+
+/** Public blog fetch by slug (only published is served publicly; admin reads by id). */
+app.get("/articles/slug/:slug", async (c) => {
+  const row = await getArticleBySlug(db, c.req.param("slug"));
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+
+app.get("/articles/:id", async (c) => {
+  const row = await getArticleById(db, Number(c.req.param("id")));
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+
+/** Create a draft (Claude content pipeline). */
+app.post("/articles", async (c) => {
+  try {
+    const input = await c.req.json();
+    const res = await createArticle(db, input);
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof ArticleInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /articles]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+
+/** Approve (status=published) / return (status=rejected + note) / inline-edit. */
+app.patch("/articles/:id", async (c) => {
+  try {
+    const patch = await c.req.json();
+    const res = await updateArticle(db, Number(c.req.param("id")), patch);
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[PATCH /articles]", err);
+    return c.json({ error: "update failed" }, 500);
+  }
+});
+
+app.delete("/articles/:id", async (c) => {
+  const ok = await deleteArticle(db, Number(c.req.param("id")));
+  return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
 });
