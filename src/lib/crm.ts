@@ -314,13 +314,49 @@ export async function addTask(
   return t;
 }
 
-export async function toggleTask(db: AnyPgDatabase, taskId: number, done: boolean) {
+/** Patch a task: done flag and/or reschedule (dueAt; null clears the deadline). */
+export async function updateTask(
+  db: AnyPgDatabase,
+  taskId: number,
+  patch: { done?: boolean; dueAt?: string | null },
+) {
+  const set: { done?: boolean; dueAt?: Date | null } = {};
+  if (typeof patch.done === "boolean") set.done = patch.done;
+  if ("dueAt" in patch) set.dueAt = patch.dueAt ? new Date(patch.dueAt) : null;
+  if (Object.keys(set).length === 0) return null;
   const [t] = await db
     .update(leadTasks)
-    .set({ done })
+    .set(set)
     .where(eq(leadTasks.id, taskId))
     .returning({ id: leadTasks.id });
   return t ?? null;
+}
+
+/**
+ * Tasks across all leads, joined with lead + contact — the unified tasks
+ * page ("what do I do today"). Open by default; PG sorts NULL dueAt last.
+ */
+export async function listTasks(db: AnyPgDatabase, opts: { done?: boolean; limit?: number } = {}) {
+  const { done = false, limit = 300 } = opts;
+  return db
+    .select({
+      id: leadTasks.id,
+      leadId: leadTasks.leadId,
+      title: leadTasks.title,
+      dueAt: leadTasks.dueAt,
+      done: leadTasks.done,
+      createdAt: leadTasks.createdAt,
+      leadName: leads.name,
+      leadStatus: leads.status,
+      contactName: contacts.firstName,
+      phone: contacts.phone,
+    })
+    .from(leadTasks)
+    .innerJoin(leads, eq(leadTasks.leadId, leads.id))
+    .leftJoin(contacts, eq(leads.contactId, contacts.id))
+    .where(eq(leadTasks.done, done))
+    .orderBy(asc(leadTasks.dueAt), asc(leadTasks.id))
+    .limit(limit);
 }
 
 /**

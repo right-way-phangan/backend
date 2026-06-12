@@ -1238,9 +1238,28 @@ async function addTask(db2, leadId, title, dueAt) {
   const [t] = await db2.insert(leadTasks).values({ leadId, title: title.trim(), dueAt: dueAt ? new Date(dueAt) : null }).returning({ id: leadTasks.id });
   return t;
 }
-async function toggleTask(db2, taskId, done) {
-  const [t] = await db2.update(leadTasks).set({ done }).where(eq3(leadTasks.id, taskId)).returning({ id: leadTasks.id });
+async function updateTask(db2, taskId, patch) {
+  const set = {};
+  if (typeof patch.done === "boolean") set.done = patch.done;
+  if ("dueAt" in patch) set.dueAt = patch.dueAt ? new Date(patch.dueAt) : null;
+  if (Object.keys(set).length === 0) return null;
+  const [t] = await db2.update(leadTasks).set(set).where(eq3(leadTasks.id, taskId)).returning({ id: leadTasks.id });
   return t ?? null;
+}
+async function listTasks(db2, opts = {}) {
+  const { done = false, limit = 300 } = opts;
+  return db2.select({
+    id: leadTasks.id,
+    leadId: leadTasks.leadId,
+    title: leadTasks.title,
+    dueAt: leadTasks.dueAt,
+    done: leadTasks.done,
+    createdAt: leadTasks.createdAt,
+    leadName: leads.name,
+    leadStatus: leads.status,
+    contactName: contacts.firstName,
+    phone: contacts.phone
+  }).from(leadTasks).innerJoin(leads, eq3(leadTasks.leadId, leads.id)).leftJoin(contacts, eq3(leads.contactId, contacts.id)).where(eq3(leadTasks.done, done)).orderBy(asc(leadTasks.dueAt), asc(leadTasks.id)).limit(limit);
 }
 async function updateLeadContact(db2, id, patch) {
   const [lead] = await db2.select().from(leads).where(eq3(leads.id, id));
@@ -1336,8 +1355,95 @@ async function verifyLogin(db2, email, password) {
   return { id: u2.id, email: u2.email, name: u2.name, role: u2.role };
 }
 
+// src/lib/articles.ts
+import { eq as eq5, and as and2, desc as desc2, sql as sql3, inArray } from "drizzle-orm";
+var ArticleInputError = class extends Error {
+};
+var STATUSES = ["pending", "published", "rejected"];
+function estimateReadMins(markdown) {
+  const words = markdown.trim().split(/\s+/).filter(Boolean).length;
+  return Math.max(1, Math.round(words / 200));
+}
+function slugify(input) {
+  return input.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+}
+async function createArticle(db2, input) {
+  const title = String(input.title ?? "").trim();
+  const excerpt = String(input.excerpt ?? "").trim();
+  const bodyMd = String(input.bodyMd ?? "").trim();
+  if (!title) throw new ArticleInputError("title is required");
+  if (!excerpt) throw new ArticleInputError("excerpt is required");
+  if (!bodyMd) throw new ArticleInputError("bodyMd is required");
+  const lang = input.lang === "ru" ? "ru" : "en";
+  let slug = input.slug?.trim() || slugify(title) || `article-${Date.now()}`;
+  const existing = await db2.select({ slug: articles.slug }).from(articles).where(sql3`${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"}`);
+  if (existing.some((r) => r.slug === slug)) {
+    let n = 2;
+    const taken = new Set(existing.map((r) => r.slug));
+    while (taken.has(`${slug}-${n}`)) n++;
+    slug = `${slug}-${n}`;
+  }
+  const [row] = await db2.insert(articles).values({
+    slug,
+    lang,
+    title,
+    excerpt,
+    topic: input.topic?.trim() || "Guide",
+    bodyMd,
+    takeaways: input.takeaways?.length ? input.takeaways : null,
+    coverImage: input.coverImage?.trim() || null,
+    readMins: estimateReadMins(bodyMd),
+    status: STATUSES.includes(input.status) ? input.status : "pending"
+  }).returning();
+  return row;
+}
+async function listArticles(db2, opts = {}) {
+  const conds = [];
+  if (opts.status) conds.push(eq5(articles.status, opts.status));
+  if (opts.lang) conds.push(eq5(articles.lang, opts.lang));
+  return db2.select().from(articles).where(conds.length ? and2(...conds) : void 0).orderBy(desc2(sql3`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
+}
+async function getArticleById(db2, id) {
+  const [row] = await db2.select().from(articles).where(eq5(articles.id, id)).limit(1);
+  return row ?? null;
+}
+async function getArticleBySlug(db2, slug) {
+  const [row] = await db2.select().from(articles).where(eq5(articles.slug, slug)).limit(1);
+  return row ?? null;
+}
+async function countPending(db2, lang) {
+  const conds = [eq5(articles.status, "pending")];
+  if (lang) conds.push(eq5(articles.lang, lang));
+  const [r] = await db2.select({ n: sql3`count(*)::int` }).from(articles).where(and2(...conds));
+  return r?.n ?? 0;
+}
+async function updateArticle(db2, id, patch) {
+  const set = { updatedAt: /* @__PURE__ */ new Date() };
+  if (patch.status && STATUSES.includes(patch.status)) {
+    set.status = patch.status;
+    if (patch.status === "published") set.publishedAt = /* @__PURE__ */ new Date();
+    if (patch.status !== "rejected") set.reviewerNote = null;
+  }
+  if (patch.reviewerNote !== void 0) set.reviewerNote = patch.reviewerNote;
+  if (patch.title !== void 0) set.title = patch.title;
+  if (patch.excerpt !== void 0) set.excerpt = patch.excerpt;
+  if (patch.topic !== void 0) set.topic = patch.topic;
+  if (patch.bodyMd !== void 0) {
+    set.bodyMd = patch.bodyMd;
+    set.readMins = estimateReadMins(patch.bodyMd);
+  }
+  if (patch.takeaways !== void 0) set.takeaways = patch.takeaways;
+  if (patch.coverImage !== void 0) set.coverImage = patch.coverImage;
+  const [row] = await db2.update(articles).set(set).where(eq5(articles.id, id)).returning();
+  return row ?? null;
+}
+async function deleteArticle(db2, id) {
+  const res = await db2.delete(articles).where(eq5(articles.id, id)).returning({ id: articles.id });
+  return res.length > 0;
+}
+
 // src/lib/contact-bot.ts
-import { eq as eq5 } from "drizzle-orm";
+import { eq as eq6 } from "drizzle-orm";
 var SITE = "https://rightwaygroup.co";
 var FLOOD_WINDOW_MS = 6e4;
 var FLOOD_MAX = 16;
@@ -1389,7 +1495,7 @@ async function handleContactUpdate(db2, update, cfg) {
   if (!msg || !msg.from || msg.from.is_bot) return;
   if (msg.from.id === cfg.ownerId) {
     if (!msg.reply_to_message) return;
-    const rows = await db2.select().from(contactThreads).where(eq5(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
+    const rows = await db2.select().from(contactThreads).where(eq6(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
     const thread = rows[0];
     if (!thread) {
       await tg(cfg, "sendMessage", {
@@ -1431,7 +1537,7 @@ async function handleContactUpdate(db2, update, cfg) {
       return;
     }
   }
-  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq5(contactThreads.clientChatId, msg.chat.id));
+  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq6(contactThreads.clientChatId, msg.chat.id));
   const firstContact = history.length === 0;
   const cutoff = new Date(Date.now() - FLOOD_WINDOW_MS);
   const recent = history.filter((h2) => h2.createdAt > cutoff).length;
@@ -1667,9 +1773,57 @@ app.post("/leads/:id/tasks", async (c) => {
   return res ? c.json(res, 201) : c.json({ error: "empty title" }, 400);
 });
 app.patch("/tasks/:id", async (c) => {
-  const { done } = await c.req.json();
-  const res = await toggleTask(db, Number(c.req.param("id")), Boolean(done));
+  const patch = await c.req.json();
+  const res = await updateTask(db, Number(c.req.param("id")), patch ?? {});
   return res ? c.json(res) : c.json({ error: "not found" }, 404);
+});
+app.get("/tasks", async (c) => {
+  const done = c.req.query("done") === "1";
+  const limit = Math.min(Number(c.req.query("limit")) || 300, 1e3);
+  return c.json(await listTasks(db, { done, limit }));
+});
+app.get("/articles", async (c) => {
+  const status = c.req.query("status");
+  const lang = c.req.query("lang") || void 0;
+  const data = await listArticles(db, { status, lang });
+  return c.json(data);
+});
+app.get("/articles/pending-count", async (c) => {
+  const lang = c.req.query("lang") || void 0;
+  return c.json({ count: await countPending(db, lang) });
+});
+app.get("/articles/slug/:slug", async (c) => {
+  const row = await getArticleBySlug(db, c.req.param("slug"));
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+app.get("/articles/:id", async (c) => {
+  const row = await getArticleById(db, Number(c.req.param("id")));
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+app.post("/articles", async (c) => {
+  try {
+    const input = await c.req.json();
+    const res = await createArticle(db, input);
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof ArticleInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /articles]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+app.patch("/articles/:id", async (c) => {
+  try {
+    const patch = await c.req.json();
+    const res = await updateArticle(db, Number(c.req.param("id")), patch);
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[PATCH /articles]", err);
+    return c.json({ error: "update failed" }, 500);
+  }
+});
+app.delete("/articles/:id", async (c) => {
+  const ok = await deleteArticle(db, Number(c.req.param("id")));
+  return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
 });
 
 // src/api/vercel-entry.ts

@@ -19,7 +19,7 @@ import { getPublicObjects, getAllObjects } from "../lib/queries";
 import { createObject, updateObject, addObjectPhotos, ObjectInputError } from "../lib/write";
 import {
   createLead, listLeads, listPipelines, updateLead, seedCrm,
-  getLead, addNote, addTask, toggleTask, updateLeadContact, deleteLead,
+  getLead, addNote, addTask, updateTask, listTasks, updateLeadContact, deleteLead,
   listEvents,
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
@@ -260,10 +260,18 @@ app.post("/leads/:id/tasks", async (c) => {
   return res ? c.json(res, 201) : c.json({ error: "empty title" }, 400);
 });
 
+/** Patch a task: { done?, dueAt? } — toggle + reschedule (snooze). */
 app.patch("/tasks/:id", async (c) => {
-  const { done } = await c.req.json();
-  const res = await toggleTask(db, Number(c.req.param("id")), Boolean(done));
+  const patch = await c.req.json();
+  const res = await updateTask(db, Number(c.req.param("id")), patch ?? {});
   return res ? c.json(res) : c.json({ error: "not found" }, 404);
+});
+
+/** Tasks across all leads — unified tasks page. ?done=1 for completed, ?limit. */
+app.get("/tasks", async (c) => {
+  const done = c.req.query("done") === "1";
+  const limit = Math.min(Number(c.req.query("limit")) || 300, 1000);
+  return c.json(await listTasks(db, { done, limit }));
 });
 
 // ─── Blog articles (content pipeline + review-gate) ───
