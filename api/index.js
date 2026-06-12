@@ -235,6 +235,8 @@ var leads = pgTable(
     // why the deal was lost (price | changed-mind | competitor | no-reply | other:…)
     dealValue: doublePrecision("deal_value"),
     // expected deal size, THB — pipeline money on the dashboard
+    commissionValue: doublePrecision("commission_value"),
+    // actual commission, THB — deals ledger (co-agency/referral splits make it ≠ formula)
     amoLeadId: bigint("amo_lead_id", { mode: "number" }).unique(),
     // migration traceability
     rwNumber: text("rw_number"),
@@ -1154,6 +1156,7 @@ async function listLeads(db2, limit = 500) {
     status: leads.status,
     lostReason: leads.lostReason,
     dealValue: leads.dealValue,
+    commissionValue: leads.commissionValue,
     rwNumber: leads.rwNumber,
     source: leads.source,
     kind: leads.kind,
@@ -1203,6 +1206,7 @@ async function getLead(db2, id) {
     status: leads.status,
     lostReason: leads.lostReason,
     dealValue: leads.dealValue,
+    commissionValue: leads.commissionValue,
     rwNumber: leads.rwNumber,
     source: leads.source,
     kind: leads.kind,
@@ -1320,6 +1324,10 @@ async function updateLead(db2, id, patch) {
   if (patch.dealValue !== void 0) {
     const v = patch.dealValue === null ? null : Number(patch.dealValue);
     set.dealValue = v != null && Number.isFinite(v) && v > 0 ? v : null;
+  }
+  if (patch.commissionValue !== void 0) {
+    const v = patch.commissionValue === null ? null : Number(patch.commissionValue);
+    set.commissionValue = v != null && Number.isFinite(v) && v > 0 ? v : null;
   }
   if (Array.isArray(patch.tags)) {
     set.tags = patch.tags.map((t) => String(t).trim()).filter(Boolean);

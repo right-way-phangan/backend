@@ -260,6 +260,7 @@ export const leads = pgTable(
     status: text("status").notNull().default("open"), // open | won | lost
     lostReason: text("lost_reason"), // why the deal was lost (price | changed-mind | competitor | no-reply | other:…)
     dealValue: doublePrecision("deal_value"), // expected deal size, THB — pipeline money on the dashboard
+    commissionValue: doublePrecision("commission_value"), // actual commission, THB — deals ledger (co-agency/referral splits make it ≠ formula)
     amoLeadId: bigint("amo_lead_id", { mode: "number" }).unique(), // migration traceability
     rwNumber: text("rw_number"), // object the inquiry is about, if any
     source: text("source"), // "object" | "contact"

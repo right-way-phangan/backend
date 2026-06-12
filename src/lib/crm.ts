@@ -185,6 +185,7 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
       status: leads.status,
       lostReason: leads.lostReason,
       dealValue: leads.dealValue,
+      commissionValue: leads.commissionValue,
       rwNumber: leads.rwNumber,
       source: leads.source,
       kind: leads.kind,
@@ -259,6 +260,7 @@ export async function getLead(db: AnyPgDatabase, id: number) {
       status: leads.status,
       lostReason: leads.lostReason,
       dealValue: leads.dealValue,
+      commissionValue: leads.commissionValue,
       rwNumber: leads.rwNumber,
       source: leads.source,
       kind: leads.kind,
@@ -456,6 +458,7 @@ export async function updateLead(
     status?: string;
     lostReason?: string;
     dealValue?: number | null;
+    commissionValue?: number | null;
     tags?: string[];
   },
 ): Promise<{ id: number } | null> {
@@ -467,6 +470,10 @@ export async function updateLead(
   if (patch.dealValue !== undefined) {
     const v = patch.dealValue === null ? null : Number(patch.dealValue);
     set.dealValue = v != null && Number.isFinite(v) && v > 0 ? v : null;
+  }
+  if (patch.commissionValue !== undefined) {
+    const v = patch.commissionValue === null ? null : Number(patch.commissionValue);
+    set.commissionValue = v != null && Number.isFinite(v) && v > 0 ? v : null;
   }
   if (Array.isArray(patch.tags)) {
     set.tags = patch.tags.map((t) => String(t).trim()).filter(Boolean);
