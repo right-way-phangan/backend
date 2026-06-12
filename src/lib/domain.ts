@@ -71,6 +71,9 @@ export interface RealEstateObject {
   reasonForSelling?: string;
   timeOnMarketMonths?: number;
   dateAdded?: string;
+  ddStatus?: string;
+  ddDate?: string;
+  ddLawyer?: string;
   driveFolder?: string;
   locationUrl?: string;
   lat?: number;
@@ -167,6 +170,9 @@ export function toDomain(
     reasonForSelling: u(row.reasonForSelling),
     timeOnMarketMonths: u(row.timeOnMarketMonths),
     dateAdded: u(row.dateAdded),
+    ddStatus: u(row.ddStatus),
+    ddDate: u(row.ddDate),
+    ddLawyer: u(row.ddLawyer),
     driveFolder: u(row.driveFolder),
     locationUrl: u(row.locationUrl),
     lat: u(row.lat),

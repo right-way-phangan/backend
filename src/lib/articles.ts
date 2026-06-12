@@ -5,6 +5,10 @@
  * /admin/articles → status=published (live on /blog) or returns it →
  * status=rejected + reviewerNote. Body is markdown (source of truth); the
  * public blog converts it to KbBlock[] at render time.
+ *
+ * Every article is submitted as an EN+RU pair: two rows sharing one slug,
+ * differing in lang (en → /blog/slug, ru → /ru/blog/slug). Each language is
+ * reviewed and published independently. Slug is unique per (slug, lang).
  */
 import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import { articles } from "../db/schema";
@@ -54,11 +58,17 @@ export async function createArticle(db: AnyPgDatabase, input: ArticleInputDTO): 
 
   const lang = input.lang === "ru" ? "ru" : "en";
   let slug = (input.slug?.trim() || slugify(title)) || `article-${Date.now()}`;
-  // ensure uniqueness — append -2, -3, … on collision
+  // ensure uniqueness within the language — append -2, -3, … on collision
+  // (the same slug in the other language is the paired translation, not a clash)
   const existing = await db
     .select({ slug: articles.slug })
     .from(articles)
-    .where(sql`${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"}`);
+    .where(
+      and(
+        eq(articles.lang, lang),
+        sql`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`,
+      ),
+    );
   if (existing.some((r) => r.slug === slug)) {
     let n = 2;
     const taken = new Set(existing.map((r) => r.slug));
@@ -105,8 +115,18 @@ export async function getArticleById(db: AnyPgDatabase, id: number): Promise<Art
   return row ?? null;
 }
 
-export async function getArticleBySlug(db: AnyPgDatabase, slug: string): Promise<ArticleRow | null> {
-  const [row] = await db.select().from(articles).where(eq(articles.slug, slug)).limit(1);
+export async function getArticleBySlug(
+  db: AnyPgDatabase,
+  slug: string,
+  lang?: string,
+): Promise<ArticleRow | null> {
+  const conds = [eq(articles.slug, slug)];
+  if (lang) conds.push(eq(articles.lang, lang));
+  const [row] = await db
+    .select()
+    .from(articles)
+    .where(and(...conds))
+    .limit(1);
   return row ?? null;
 }
 

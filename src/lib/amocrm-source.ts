@@ -223,6 +223,9 @@ export function mapElement(el: Element): MappedObject {
     reasonForSelling: str(cf.get("REASON_FOR_SELLING")),
     timeOnMarketMonths: num(cf.get("TIME_ON_MARKET_MONTHS")),
     dateAdded: str(cf.get("DATE_ADDED")),
+    ddStatus: str(cf.get("DD_STATUS")),
+    ddDate: str(cf.get("DD_DATE")),
+    ddLawyer: str(cf.get("DD_LAWYER")),
 
     driveFolder: str(cf.get("DRIVE_FOLDER")),
     locationUrl: str(cf.get("LOCATION_URL")),

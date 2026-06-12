@@ -44,7 +44,8 @@ import {
   boolean,
   jsonb,
   timestamp,
-  index
+  index,
+  uniqueIndex
 } from "drizzle-orm/pg-core";
 var objects = pgTable(
   "objects",
@@ -126,6 +127,14 @@ var objects = pgTable(
     timeOnMarketMonths: doublePrecision("time_on_market_months"),
     dateAdded: text("date_added"),
     // free-form as stored in amoCRM; our own ts is createdAt
+    // Due diligence (двухуровневая система, чек-лист DD v0.2 2026-06-12):
+    // Pending → в очереди L1; Vetted → L1 пройден (бейдж на сайте);
+    // Full DD → L2-отчёт по сделке; Red flag → стоп, бейдж не показываем.
+    ddStatus: text("dd_status"),
+    ddDate: text("dd_date"),
+    // YYYY-MM-DD
+    ddLawyer: text("dd_lawyer"),
+    // кто дал вердикт — НЕ публичное поле
     // External
     driveFolder: text("drive_folder"),
     locationUrl: text("location_url"),
@@ -309,7 +318,7 @@ var articles = pgTable(
   "articles",
   {
     id: serial("id").primaryKey(),
-    slug: text("slug").notNull().unique(),
+    slug: text("slug").notNull(),
     lang: text("lang").notNull().default("en"),
     // en → /blog · ru → /ru/blog
     title: text("title").notNull(),
@@ -333,7 +342,8 @@ var articles = pgTable(
   },
   (t) => ({
     statusIdx: index("articles_status_idx").on(t.status),
-    langStatusIdx: index("articles_lang_status_idx").on(t.lang, t.status)
+    langStatusIdx: index("articles_lang_status_idx").on(t.lang, t.status),
+    slugLangIdx: uniqueIndex("articles_slug_lang_unique").on(t.slug, t.lang)
   })
 );
 var processedUpdates = pgTable("processed_updates", {
@@ -450,6 +460,9 @@ function toDomain(row, photos, docs) {
     reasonForSelling: u(row.reasonForSelling),
     timeOnMarketMonths: u(row.timeOnMarketMonths),
     dateAdded: u(row.dateAdded),
+    ddStatus: u(row.ddStatus),
+    ddDate: u(row.ddDate),
+    ddLawyer: u(row.ddLawyer),
     driveFolder: u(row.driveFolder),
     locationUrl: u(row.locationUrl),
     lat: u(row.lat),
@@ -1039,7 +1052,11 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "buildYear",
   "condition",
   "reasonForSelling",
-  "timeOnMarketMonths"
+  "timeOnMarketMonths",
+  // due diligence (admin /admin/dd)
+  "ddStatus",
+  "ddDate",
+  "ddLawyer"
 ]);
 async function updateObject(db2, rwNumber, patch) {
   const set = { updatedAt: /* @__PURE__ */ new Date() };
@@ -1384,7 +1401,12 @@ async function createArticle(db2, input) {
   if (!bodyMd) throw new ArticleInputError("bodyMd is required");
   const lang = input.lang === "ru" ? "ru" : "en";
   let slug = input.slug?.trim() || slugify(title) || `article-${Date.now()}`;
-  const existing = await db2.select({ slug: articles.slug }).from(articles).where(sql3`${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"}`);
+  const existing = await db2.select({ slug: articles.slug }).from(articles).where(
+    and2(
+      eq5(articles.lang, lang),
+      sql3`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
+    )
+  );
   if (existing.some((r) => r.slug === slug)) {
     let n = 2;
     const taken = new Set(existing.map((r) => r.slug));

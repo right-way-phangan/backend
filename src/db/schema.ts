@@ -29,6 +29,7 @@ import {
   jsonb,
   timestamp,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 export const objects = pgTable(
@@ -117,6 +118,13 @@ export const objects = pgTable(
     reasonForSelling: text("reason_for_selling"),
     timeOnMarketMonths: doublePrecision("time_on_market_months"),
     dateAdded: text("date_added"), // free-form as stored in amoCRM; our own ts is createdAt
+
+    // Due diligence (двухуровневая система, чек-лист DD v0.2 2026-06-12):
+    // Pending → в очереди L1; Vetted → L1 пройден (бейдж на сайте);
+    // Full DD → L2-отчёт по сделке; Red flag → стоп, бейдж не показываем.
+    ddStatus: text("dd_status"),
+    ddDate: text("dd_date"),   // YYYY-MM-DD
+    ddLawyer: text("dd_lawyer"), // кто дал вердикт — НЕ публичное поле
 
     // External
     driveFolder: text("drive_folder"),
@@ -364,6 +372,8 @@ export type ContactThreadRow = typeof contactThreads.$inferSelect;
 // Blog / Journal articles — content pipeline with review-gate.
 // Claude writes a draft (status=pending) → Vladimir approves in /admin/articles
 // (status=published, goes live on /blog) or returns it (status=rejected + note).
+// Every article is submitted as an EN+RU pair: two rows sharing one slug,
+// differing in lang (slug is unique per language, not globally).
 // Body is stored as markdown (source of truth, editable in admin); the public
 // blog renders it via a markdown→KbBlock converter so it matches the static
 // posts in web/src/content/blog.ts. See feedback_articles_telegram_approval.
@@ -373,7 +383,7 @@ export const articles = pgTable(
   "articles",
   {
     id: serial("id").primaryKey(),
-    slug: text("slug").notNull().unique(),
+    slug: text("slug").notNull(),
     lang: text("lang").notNull().default("en"), // en → /blog · ru → /ru/blog
     title: text("title").notNull(),
     excerpt: text("excerpt").notNull(), // one-line summary: card + meta description
@@ -392,6 +402,7 @@ export const articles = pgTable(
   (t) => ({
     statusIdx: index("articles_status_idx").on(t.status),
     langStatusIdx: index("articles_lang_status_idx").on(t.lang, t.status),
+    slugLangIdx: uniqueIndex("articles_slug_lang_unique").on(t.slug, t.lang),
   }),
 );
 
