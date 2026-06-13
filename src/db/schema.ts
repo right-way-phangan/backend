@@ -128,11 +128,20 @@ export const objects = pgTable(
     // Чек-лист L1 (V1–V7): {"V1": true, ...} — какие пункты закрыты. НЕ публичное.
     ddChecklist: jsonb("dd_checklist").$type<Record<string, boolean>>(),
 
+    // Обзвон собственников (/admin/outreach). НЕ публичное.
+    // confirmed | archived | leasehold_ok | no_answer (пусто = не звонили)
+    outreachStatus: text("outreach_status"),
+    outreachNote: text("outreach_note"),
+    outreachDate: text("outreach_date"), // YYYY-MM-DD последнего касания
+    outreachAttempts: integer("outreach_attempts"),
+
     // External
     driveFolder: text("drive_folder"),
     locationUrl: text("location_url"),
     lat: doublePrecision("lat"),
     lng: doublePrecision("lng"),
+    // Traced plot contour, [lat, lng] ring (admin draws over cadastral tiles).
+    plotPolygon: jsonb("plot_polygon").$type<Array<[number, number]>>(),
     siteUrl: text("site_url"),
 
     // Description

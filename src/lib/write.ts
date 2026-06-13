@@ -32,6 +32,7 @@ export interface NewObjectInput {
   owner?: string;
   commission?: string;
   locationUrl?: string;
+  plotPolygon?: Array<[number, number]>; // traced contour, [lat, lng] ring
   zone?: string;
   roadType?: string;
   waterType?: string;
@@ -194,6 +195,26 @@ function parseLatLng(url?: string): { lat?: number; lng?: number } {
   return { lat, lng };
 }
 
+/**
+ * Traced plot contour: keep only valid [lat, lng] pairs inside the Phangan
+ * bounding box (same as parseLatLng); a ring needs ≥3 vertices to be a shape.
+ */
+export function sanitizePolygon(
+  raw: unknown,
+): Array<[number, number]> | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const pts: Array<[number, number]> = [];
+  for (const p of raw) {
+    if (!Array.isArray(p) || p.length !== 2) return undefined;
+    const lat = Number(p[0]);
+    const lng = Number(p[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
+    if (lat < 9 || lat > 10.5 || lng < 99 || lng > 101) return undefined;
+    pts.push([lat, lng]);
+  }
+  return pts.length >= 3 ? pts : undefined;
+}
+
 // ---- feature code → boolean column ----
 const FEATURE_COL: Record<string, keyof ObjectInsert> = {
   SEA_VIEW: "seaView",
@@ -302,6 +323,7 @@ function buildRow(input: NewObjectInput, rwNumber: string, title: string): Objec
 
     locationUrl: input.locationUrl,
     ...parseLatLng(input.locationUrl),
+    plotPolygon: sanitizePolygon(input.plotPolygon),
     driveFolder: input.driveFolder,
 
     // Pre-composed block (bot) wins; otherwise compose from message + commission.
@@ -407,6 +429,10 @@ const PATCHABLE = new Set<keyof ObjectInsert>([
   "reasonForSelling", "timeOnMarketMonths",
   // due diligence (admin /admin/dd)
   "ddStatus", "ddDate", "ddLawyer", "ddChecklist",
+  // обзвон собственников (admin /admin/outreach); ownerName — инлайн-обогащение
+  "outreachStatus", "outreachNote", "outreachDate", "outreachAttempts", "ownerName",
+  // traced plot contour (admin map editor); null clears
+  "plotPolygon",
 ]);
 
 /** Update whitelisted columns of an object by RW number. */
@@ -417,7 +443,12 @@ export async function updateObject(
 ): Promise<{ rwNumber: string } | null> {
   const set: Record<string, unknown> = { updatedAt: new Date() };
   for (const [k, v] of Object.entries(patch)) {
-    if (PATCHABLE.has(k as keyof ObjectInsert)) set[k] = v;
+    if (!PATCHABLE.has(k as keyof ObjectInsert)) continue;
+    if (k === "plotPolygon") {
+      set[k] = v == null ? null : (sanitizePolygon(v) ?? null);
+      continue;
+    }
+    set[k] = v;
   }
   const [row] = await db
     .update(objects)

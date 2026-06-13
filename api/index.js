@@ -137,11 +137,20 @@ var objects = pgTable(
     // кто дал вердикт — НЕ публичное поле
     // Чек-лист L1 (V1–V7): {"V1": true, ...} — какие пункты закрыты. НЕ публичное.
     ddChecklist: jsonb("dd_checklist").$type(),
+    // Обзвон собственников (/admin/outreach). НЕ публичное.
+    // confirmed | archived | leasehold_ok | no_answer (пусто = не звонили)
+    outreachStatus: text("outreach_status"),
+    outreachNote: text("outreach_note"),
+    outreachDate: text("outreach_date"),
+    // YYYY-MM-DD последнего касания
+    outreachAttempts: integer("outreach_attempts"),
     // External
     driveFolder: text("drive_folder"),
     locationUrl: text("location_url"),
     lat: doublePrecision("lat"),
     lng: doublePrecision("lng"),
+    // Traced plot contour, [lat, lng] ring (admin draws over cadastral tiles).
+    plotPolygon: jsonb("plot_polygon").$type(),
     siteUrl: text("site_url"),
     // Description
     descriptionRaw: text("description_raw"),
@@ -466,10 +475,15 @@ function toDomain(row, photos, docs) {
     ddDate: u(row.ddDate),
     ddLawyer: u(row.ddLawyer),
     ddChecklist: u(row.ddChecklist),
+    outreachStatus: u(row.outreachStatus),
+    outreachNote: u(row.outreachNote),
+    outreachDate: u(row.outreachDate),
+    outreachAttempts: u(row.outreachAttempts),
     driveFolder: u(row.driveFolder),
     locationUrl: u(row.locationUrl),
     lat: u(row.lat),
     lng: u(row.lng),
+    plotPolygon: u(row.plotPolygon) ?? void 0,
     siteUrl: u(row.siteUrl),
     coverImage: cover,
     gallery: gallery.length ? gallery : void 0,
@@ -877,6 +891,19 @@ function parseLatLng(url) {
   if (lat < 9 || lat > 10.5 || lng < 99 || lng > 101) return {};
   return { lat, lng };
 }
+function sanitizePolygon(raw) {
+  if (!Array.isArray(raw)) return void 0;
+  const pts = [];
+  for (const p of raw) {
+    if (!Array.isArray(p) || p.length !== 2) return void 0;
+    const lat = Number(p[0]);
+    const lng = Number(p[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return void 0;
+    if (lat < 9 || lat > 10.5 || lng < 99 || lng > 101) return void 0;
+    pts.push([lat, lng]);
+  }
+  return pts.length >= 3 ? pts : void 0;
+}
 var FEATURE_COL = {
   SEA_VIEW: "seaView",
   MOUNTAIN_VIEW: "mountainView",
@@ -973,6 +1000,7 @@ function buildRow(input, rwNumber, title) {
     team: parsePairs(input.team, "role", "name"),
     locationUrl: input.locationUrl,
     ...parseLatLng(input.locationUrl),
+    plotPolygon: sanitizePolygon(input.plotPolygon),
     driveFolder: input.driveFolder,
     // Pre-composed block (bot) wins; otherwise compose from message + commission.
     descriptionRaw: input.descriptionRaw?.trim() || (descParts.length ? descParts.join("\n\n") : void 0),
@@ -1060,12 +1088,25 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "ddStatus",
   "ddDate",
   "ddLawyer",
-  "ddChecklist"
+  "ddChecklist",
+  // обзвон собственников (admin /admin/outreach); ownerName — инлайн-обогащение
+  "outreachStatus",
+  "outreachNote",
+  "outreachDate",
+  "outreachAttempts",
+  "ownerName",
+  // traced plot contour (admin map editor); null clears
+  "plotPolygon"
 ]);
 async function updateObject(db2, rwNumber, patch) {
   const set = { updatedAt: /* @__PURE__ */ new Date() };
   for (const [k, v] of Object.entries(patch)) {
-    if (PATCHABLE.has(k)) set[k] = v;
+    if (!PATCHABLE.has(k)) continue;
+    if (k === "plotPolygon") {
+      set[k] = v == null ? null : sanitizePolygon(v) ?? null;
+      continue;
+    }
+    set[k] = v;
   }
   const [row] = await db2.update(objects).set(set).where(eq2(objects.rwNumber, rwNumber)).returning({ rwNumber: objects.rwNumber });
   return row ?? null;

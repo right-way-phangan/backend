@@ -75,10 +75,15 @@ export interface RealEstateObject {
   ddDate?: string;
   ddLawyer?: string;
   ddChecklist?: Record<string, boolean>;
+  outreachStatus?: string;
+  outreachNote?: string;
+  outreachDate?: string;
+  outreachAttempts?: number;
   driveFolder?: string;
   locationUrl?: string;
   lat?: number;
   lng?: number;
+  plotPolygon?: Array<[number, number]>;
   siteUrl?: string;
   coverImage?: string;
   gallery?: string[];
@@ -175,10 +180,15 @@ export function toDomain(
     ddDate: u(row.ddDate),
     ddLawyer: u(row.ddLawyer),
     ddChecklist: u(row.ddChecklist),
+    outreachStatus: u(row.outreachStatus),
+    outreachNote: u(row.outreachNote),
+    outreachDate: u(row.outreachDate),
+    outreachAttempts: u(row.outreachAttempts),
     driveFolder: u(row.driveFolder),
     locationUrl: u(row.locationUrl),
     lat: u(row.lat),
     lng: u(row.lng),
+    plotPolygon: u(row.plotPolygon) ?? undefined,
     siteUrl: u(row.siteUrl),
     coverImage: cover,
     gallery: gallery.length ? gallery : undefined,

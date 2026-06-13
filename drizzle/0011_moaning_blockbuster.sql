@@ -1,0 +1,1 @@
+ALTER TABLE "objects" ADD COLUMN "plot_polygon" jsonb;
