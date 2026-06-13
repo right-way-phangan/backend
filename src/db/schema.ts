@@ -448,3 +448,75 @@ export const processedUpdates = pgTable("processed_updates", {
   updateId: bigint("update_id", { mode: "number" }).primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ============================================================
+// «RW Оценка» — инструмент оценки недвижимости (/admin/valuation).
+// Движок (сравнительный + доходный + затратный методы) — чистая функция в
+// web/src/lib/valuation/engine.ts: компсы берёт из objects + valuation_comps,
+// ADR/загрузку — из web/src/content/rental-market.json. Здесь только состояние:
+//   valuation_factors — переопределения коэффициентов; дефолты живут в коде
+//     движка, БД хранит лишь то, что правили в админке (пусто = дефолты);
+//   valuation_comps  — внешние компсы (объявления конкурентов, FazWaz и т.п.),
+//     ручной ввод; снятые с рынка (sold/gone) — прокси реальных сделок;
+//   valuations       — журнал оценок (вход + результат) для истории/калибровки.
+// ============================================================
+
+export const valuationFactors = pgTable("valuation_factors", {
+  key: text("key").primaryKey(), // "doc.nor_sor_3" / "feature.sea_view" / "income.cap_rate" …
+  value: doublePrecision("value").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type ValuationFactorRow = typeof valuationFactors.$inferSelect;
+
+export const valuationComps = pgTable(
+  "valuation_comps",
+  {
+    id: serial("id").primaryKey(),
+    type: text("type").notNull().default("Land"), // Land | Villa | House | Apartment
+    district: text("district"),
+    areaRai: doublePrecision("area_rai"),
+    builtSqm: doublePrecision("built_sqm"),
+    bedrooms: doublePrecision("bedrooms"),
+    priceThb: doublePrecision("price_thb").notNull(),
+    documentType: text("document_type"),
+    seaView: boolean("sea_view").notNull().default(false),
+    beachfront: boolean("beachfront").notNull().default(false),
+    electricity: boolean("electricity").notNull().default(false),
+    roadType: text("road_type"),
+    terrain: text("terrain"),
+    zone: text("zone"),
+    status: text("status").notNull().default("active"), // active | sold | gone
+    sourceUrl: text("source_url"),
+    note: text("note"),
+    seenAt: text("seen_at"), // YYYY-MM-DD — когда видели объявление
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    districtIdx: index("valuation_comps_district_idx").on(t.district),
+  }),
+);
+
+export type ValuationCompRow = typeof valuationComps.$inferSelect;
+export type ValuationCompInsert = typeof valuationComps.$inferInsert;
+
+export const valuations = pgTable(
+  "valuations",
+  {
+    id: serial("id").primaryKey(),
+    rwNumber: text("rw_number"), // заполнен, если оценивали объект каталога
+    subject: jsonb("subject").notNull().$type<Record<string, unknown>>(),
+    result: jsonb("result").notNull().$type<Record<string, unknown>>(),
+    fairValue: doublePrecision("fair_value"),
+    lowValue: doublePrecision("low_value"),
+    highValue: doublePrecision("high_value"),
+    confidence: text("confidence"), // high | medium | low
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    rwIdx: index("valuations_rw_idx").on(t.rwNumber),
+  }),
+);
+
+export type ValuationRow = typeof valuations.$inferSelect;
