@@ -1184,7 +1184,7 @@ async function updateObject(db2, rwNumber, patch) {
 }
 
 // src/lib/crm.ts
-import { eq as eq3, and, asc, desc, sql as sql2 } from "drizzle-orm";
+import { eq as eq3, and, asc, desc, gte, sql as sql2 } from "drizzle-orm";
 var PIPELINES = [
   { key: "land", name: "Land", sort: 0 },
   { key: "villa_house", name: "Villas & Houses", sort: 1 },
@@ -1321,7 +1321,7 @@ async function listLeads(db2, limit = 500) {
   const notesByLead = new Map(notesAgg.map((n) => [n.leadId, (n.text || "").slice(0, 1500)]));
   const lastEvent = await db2.select({
     leadId: leadEvents.leadId,
-    last: sql2`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} <> 'touch')`,
+    last: sql2`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} in ('created','stage'))`,
     lastTouch: sql2`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} = 'touch')`
   }).from(leadEvents).groupBy(leadEvents.leadId);
   const stageSinceByLead = new Map(lastEvent.map((e) => [e.leadId, e.last]));
@@ -1390,6 +1390,22 @@ async function addTouch(db2, leadId, kind) {
   await db2.insert(leadEvents).values({ leadId, type: "touch", toStage: label });
   await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq3(leads.id, leadId));
   return { id: leadId, label };
+}
+async function addShortlistView(db2, leadId) {
+  const [lead] = await db2.select({ id: leads.id }).from(leads).where(eq3(leads.id, leadId));
+  if (!lead) return null;
+  const sixHoursAgo = new Date(Date.now() - 6 * 36e5);
+  const [recent] = await db2.select({ id: leadEvents.id }).from(leadEvents).where(
+    and(
+      eq3(leadEvents.leadId, leadId),
+      eq3(leadEvents.type, "shortlist_view"),
+      gte(leadEvents.createdAt, sixHoursAgo)
+    )
+  ).limit(1);
+  if (recent) return { id: leadId, recorded: false };
+  await db2.insert(leadEvents).values({ leadId, type: "shortlist_view", toStage: "\u{1F440} \u041E\u0442\u043A\u0440\u044B\u043B \u043F\u043E\u0434\u0431\u043E\u0440\u043A\u0443" });
+  await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq3(leads.id, leadId));
+  return { id: leadId, recorded: true };
 }
 async function addNote(db2, leadId, text2) {
   if (!text2.trim()) return null;
@@ -2158,6 +2174,10 @@ app.post("/leads/:id/touch", async (c) => {
   const { kind } = await c.req.json();
   const res = await addTouch(db, Number(c.req.param("id")), String(kind ?? ""));
   return res ? c.json(res, 201) : c.json({ error: "bad kind or lead" }, 400);
+});
+app.post("/leads/:id/shortlist-view", async (c) => {
+  const res = await addShortlistView(db, Number(c.req.param("id")));
+  return res ? c.json(res) : c.json({ error: "lead not found" }, 404);
 });
 app.get("/articles", async (c) => {
   const status = c.req.query("status");

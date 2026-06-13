@@ -3,7 +3,7 @@
  * /leads/complex. Website forms send a normalized payload; we persist
  * contact + lead + first note, routed into a pipeline/stage.
  */
-import { eq, and, asc, desc, sql } from "drizzle-orm";
+import { eq, and, asc, desc, gte, sql } from "drizzle-orm";
 import { pipelines, stages, contacts, leads, leadNotes, leadTasks, leadEvents } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
 
@@ -239,7 +239,7 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
   const lastEvent = await db
     .select({
       leadId: leadEvents.leadId,
-      last: sql<string>`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} <> 'touch')`,
+      last: sql<string>`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} in ('created','stage'))`,
       lastTouch: sql<string | null>`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} = 'touch')`,
     })
     .from(leadEvents)
@@ -330,6 +330,33 @@ export async function addTouch(db: AnyPgDatabase, leadId: number, kind: string) 
   await db.insert(leadEvents).values({ leadId, type: "touch", toStage: label });
   await db.update(leads).set({ updatedAt: new Date() }).where(eq(leads.id, leadId));
   return { id: leadId, label };
+}
+
+/**
+ * Record that the client opened their shared shortlist page (/s/<token>).
+ * Debounced: skips if the lead already has a shortlist_view event within the
+ * last 6h, so a reload doesn't spam the timeline. High-signal — the agent sees
+ * "клиент открыл подборку" and calls while it's warm.
+ */
+export async function addShortlistView(db: AnyPgDatabase, leadId: number) {
+  const [lead] = await db.select({ id: leads.id }).from(leads).where(eq(leads.id, leadId));
+  if (!lead) return null;
+  const sixHoursAgo = new Date(Date.now() - 6 * 3_600_000);
+  const [recent] = await db
+    .select({ id: leadEvents.id })
+    .from(leadEvents)
+    .where(
+      and(
+        eq(leadEvents.leadId, leadId),
+        eq(leadEvents.type, "shortlist_view"),
+        gte(leadEvents.createdAt, sixHoursAgo),
+      ),
+    )
+    .limit(1);
+  if (recent) return { id: leadId, recorded: false };
+  await db.insert(leadEvents).values({ leadId, type: "shortlist_view", toStage: "👀 Открыл подборку" });
+  await db.update(leads).set({ updatedAt: new Date() }).where(eq(leads.id, leadId));
+  return { id: leadId, recorded: true };
 }
 
 export async function addNote(db: AnyPgDatabase, leadId: number, text: string) {

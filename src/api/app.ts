@@ -20,7 +20,7 @@ import { createObject, updateObject, addObjectPhotos, ObjectInputError } from ".
 import {
   createLead, listLeads, listPipelines, updateLead, seedCrm,
   getLead, addNote, addTask, updateTask, listTasks, updateLeadContact, deleteLead,
-  listEvents, listContacts, addTouch, mergeContacts,
+  listEvents, listContacts, addTouch, addShortlistView, mergeContacts,
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
 import { trackView, viewsSummary } from "../lib/views";
@@ -322,6 +322,12 @@ app.post("/leads/:id/touch", async (c) => {
   const { kind } = await c.req.json();
   const res = await addTouch(db, Number(c.req.param("id")), String(kind ?? ""));
   return res ? c.json(res, 201) : c.json({ error: "bad kind or lead" }, 400);
+});
+
+/** Client opened their shared shortlist (/s/<token>) — debounced timeline event. */
+app.post("/leads/:id/shortlist-view", async (c) => {
+  const res = await addShortlistView(db, Number(c.req.param("id")));
+  return res ? c.json(res) : c.json({ error: "lead not found" }, 404);
 });
 
 // ─── Blog articles (content pipeline + review-gate) ───
