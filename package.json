@@ -13,6 +13,7 @@
     "migrate:amocrm": "tsx src/scripts/migrate-from-amocrm.ts",
     "migrate:leads": "tsx src/scripts/migrate-leads-from-amocrm.ts",
     "create-user": "PGLITE_DIR=./.pgdata tsx src/scripts/create-user.ts",
+    "seed:comps": "tsx src/scripts/seed-valuation-comps.ts",
     "load:local": "tsx src/scripts/load-local.ts",
     "api:local": "PGLITE_DIR=./.pgdata tsx src/api/server.ts",
     "api": "tsx src/api/server.ts",
