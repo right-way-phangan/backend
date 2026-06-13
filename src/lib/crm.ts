@@ -83,6 +83,8 @@ export interface NewLeadInput {
   leadName: string;
   pipeline: "land" | "villa_house";
   contact: { name: string; email?: string; phone?: string };
+  /** Reuse an existing contact row (legacy revive) instead of creating a new one. */
+  contactId?: number;
   note?: string;
   tags?: string[];
   rwNumber?: string;
@@ -117,14 +119,28 @@ export async function createLead(
     .limit(1);
 
   return db.transaction(async (tx: AnyPgDatabase) => {
-    const [contact] = await tx
-      .insert(contacts)
-      .values({
-        firstName: input.contact.name,
-        email: input.contact.email,
-        phone: input.contact.phone,
-      })
-      .returning({ id: contacts.id });
+    // Either link the existing contact (legacy revive keeps the book clean)
+    // or create a fresh one from the form payload.
+    let contactId = input.contactId ?? null;
+    if (contactId != null) {
+      const [existing] = await tx
+        .select({ id: contacts.id })
+        .from(contacts)
+        .where(eq(contacts.id, contactId));
+      if (!existing) contactId = null;
+    }
+    if (contactId == null) {
+      const [created] = await tx
+        .insert(contacts)
+        .values({
+          firstName: input.contact.name,
+          email: input.contact.email,
+          phone: input.contact.phone,
+        })
+        .returning({ id: contacts.id });
+      contactId = created.id;
+    }
+    const contact = { id: contactId };
 
     const [lead] = await tx
       .insert(leads)
@@ -218,15 +234,18 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
     .groupBy(leadNotes.leadId);
   const notesByLead = new Map(notesAgg.map((n) => [n.leadId, (n.text || "").slice(0, 1500)]));
 
-  // When the lead landed on its current stage (last event), for "days on stage".
+  // When the lead landed on its current stage (last stage/created event) and
+  // when it was last actually touched (call/message/meeting) — one pass.
   const lastEvent = await db
     .select({
       leadId: leadEvents.leadId,
-      last: sql<string>`max(${leadEvents.createdAt})`,
+      last: sql<string>`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} <> 'touch')`,
+      lastTouch: sql<string | null>`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} = 'touch')`,
     })
     .from(leadEvents)
     .groupBy(leadEvents.leadId);
   const stageSinceByLead = new Map(lastEvent.map((e) => [e.leadId, e.last]));
+  const lastTouchByLead = new Map(lastEvent.map((e) => [e.leadId, e.lastTouch]));
 
   // Open-task counters per lead (one query, aggregated in JS).
   const open = await db
@@ -247,6 +266,7 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
     openTasks: byLead.get(r.id)?.open ?? 0,
     overdueTasks: byLead.get(r.id)?.overdue ?? 0,
     stageSince: stageSinceByLead.get(r.id) ?? null,
+    lastTouchAt: lastTouchByLead.get(r.id) ?? null,
     notesText: notesByLead.get(r.id) ?? "",
   }));
 }
@@ -290,6 +310,25 @@ export async function getLead(db: AnyPgDatabase, id: number) {
   ]);
   const stagesForPipe = pipe.find((p) => p.key === row.pipelineKey)?.stages ?? [];
   return { ...row, notes, tasks, events, stages: stagesForPipe };
+}
+
+/** Touch labels — what the one-tap log buttons write into the timeline. */
+const TOUCH_LABELS: Record<string, string> = {
+  call: "📞 Звонок",
+  message: "💬 Сообщение",
+  meet: "🤝 Встреча",
+};
+
+/** One-tap touch log: records a real contact moment (call/message/meeting).
+ * Feeds `lastTouchAt` — the honest "when did we actually talk" signal. */
+export async function addTouch(db: AnyPgDatabase, leadId: number, kind: string) {
+  const label = TOUCH_LABELS[kind];
+  if (!label) return null;
+  const [lead] = await db.select({ id: leads.id }).from(leads).where(eq(leads.id, leadId));
+  if (!lead) return null;
+  await db.insert(leadEvents).values({ leadId, type: "touch", toStage: label });
+  await db.update(leads).set({ updatedAt: new Date() }).where(eq(leads.id, leadId));
+  return { id: leadId, label };
 }
 
 export async function addNote(db: AnyPgDatabase, leadId: number, text: string) {
@@ -355,6 +394,31 @@ export async function listContacts(db: AnyPgDatabase, limit = 1000) {
     .groupBy(contacts.id)
     .orderBy(asc(contacts.firstName), asc(contacts.id))
     .limit(limit);
+}
+
+/**
+ * Merge duplicate contacts: re-point every lead from `mergeId` to `keepId`,
+ * fill keepId's empty email/phone from the duplicate, delete the duplicate.
+ * The import brought the amo book wholesale — dupes by phone/email are expected.
+ */
+export async function mergeContacts(db: AnyPgDatabase, keepId: number, mergeId: number) {
+  if (keepId === mergeId) return null;
+  const [keep] = await db.select().from(contacts).where(eq(contacts.id, keepId));
+  const [dupe] = await db.select().from(contacts).where(eq(contacts.id, mergeId));
+  if (!keep || !dupe) return null;
+  return db.transaction(async (tx: AnyPgDatabase) => {
+    const moved = await tx
+      .update(leads)
+      .set({ contactId: keepId })
+      .where(eq(leads.contactId, mergeId))
+      .returning({ id: leads.id });
+    const fill: { email?: string | null; phone?: string | null } = {};
+    if (!keep.email && dupe.email) fill.email = dupe.email;
+    if (!keep.phone && dupe.phone) fill.phone = dupe.phone;
+    if (Object.keys(fill).length) await tx.update(contacts).set(fill).where(eq(contacts.id, keepId));
+    await tx.delete(contacts).where(eq(contacts.id, mergeId));
+    return { keepId, mergedLeads: moved.length };
+  });
 }
 
 /**
@@ -522,6 +586,20 @@ export async function updateLead(
   const [row] = await db.update(leads).set(set).where(eq(leads.id, id)).returning({ id: leads.id });
   if (row && stageEvent) {
     await db.insert(leadEvents).values({ leadId: id, type: "stage", ...stageEvent });
+    // Revival follow-up: «передумал» и «не отвечает» на Пангане часто
+    // возвращаются — потерянному с такой причиной ставим задачу спросить
+    // снова через 30 дней (date-only → попадает в утренний дайджест).
+    const reason = typeof patch.lostReason === "string" ? patch.lostReason : "";
+    if (set.status === "lost" && /передумал|не отвечает/i.test(reason)) {
+      const due = new Date();
+      due.setUTCDate(due.getUTCDate() + 30);
+      due.setUTCHours(0, 0, 0, 0);
+      await db.insert(leadTasks).values({
+        leadId: id,
+        title: "🔁 Реанимация: спросить ещё раз (авто, 30 дн после потери)",
+        dueAt: due,
+      });
+    }
   }
   return row ?? null;
 }

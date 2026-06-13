@@ -27,12 +27,16 @@ __export(schema_exports, {
   leads: () => leads,
   objectDocs: () => objectDocs,
   objectPhotos: () => objectPhotos,
+  objectViewsDaily: () => objectViewsDaily,
   objects: () => objects,
   pipelines: () => pipelines,
   processedUpdates: () => processedUpdates,
   projectUnits: () => projectUnits,
   stages: () => stages,
-  users: () => users
+  users: () => users,
+  valuationComps: () => valuationComps,
+  valuationFactors: () => valuationFactors,
+  valuations: () => valuations
 });
 import {
   pgTable,
@@ -45,7 +49,8 @@ import {
   jsonb,
   timestamp,
   index,
-  uniqueIndex
+  uniqueIndex,
+  primaryKey
 } from "drizzle-orm/pg-core";
 var objects = pgTable(
   "objects",
@@ -204,6 +209,16 @@ var projectUnits = pgTable(
   },
   (t) => ({ objIdx: index("project_units_object_idx").on(t.objectId) })
 );
+var objectViewsDaily = pgTable(
+  "object_views_daily",
+  {
+    rwNumber: text("rw_number").notNull(),
+    day: text("day").notNull(),
+    // YYYY-MM-DD, Asia/Bangkok (UTC+7, no DST)
+    views: integer("views").notNull().default(0)
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.rwNumber, t.day] }) })
+);
 var pipelines = pgTable("pipelines", {
   id: serial("id").primaryKey(),
   key: text("key").notNull().unique(),
@@ -361,6 +376,62 @@ var processedUpdates = pgTable("processed_updates", {
   updateId: bigint("update_id", { mode: "number" }).primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
+var valuationFactors = pgTable("valuation_factors", {
+  key: text("key").primaryKey(),
+  // "doc.nor_sor_3" / "feature.sea_view" / "income.cap_rate" …
+  value: doublePrecision("value").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+});
+var valuationComps = pgTable(
+  "valuation_comps",
+  {
+    id: serial("id").primaryKey(),
+    type: text("type").notNull().default("Land"),
+    // Land | Villa | House | Apartment
+    district: text("district"),
+    areaRai: doublePrecision("area_rai"),
+    builtSqm: doublePrecision("built_sqm"),
+    bedrooms: doublePrecision("bedrooms"),
+    priceThb: doublePrecision("price_thb").notNull(),
+    documentType: text("document_type"),
+    seaView: boolean("sea_view").notNull().default(false),
+    beachfront: boolean("beachfront").notNull().default(false),
+    electricity: boolean("electricity").notNull().default(false),
+    roadType: text("road_type"),
+    terrain: text("terrain"),
+    zone: text("zone"),
+    status: text("status").notNull().default("active"),
+    // active | sold | gone
+    sourceUrl: text("source_url"),
+    note: text("note"),
+    seenAt: text("seen_at"),
+    // YYYY-MM-DD — когда видели объявление
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({
+    districtIdx: index("valuation_comps_district_idx").on(t.district)
+  })
+);
+var valuations = pgTable(
+  "valuations",
+  {
+    id: serial("id").primaryKey(),
+    rwNumber: text("rw_number"),
+    // заполнен, если оценивали объект каталога
+    subject: jsonb("subject").notNull().$type(),
+    result: jsonb("result").notNull().$type(),
+    fairValue: doublePrecision("fair_value"),
+    lowValue: doublePrecision("low_value"),
+    highValue: doublePrecision("high_value"),
+    confidence: text("confidence"),
+    // high | medium | low
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({
+    rwIdx: index("valuations_rw_idx").on(t.rwNumber)
+  })
+);
 
 // src/db/connect.ts
 async function createDb() {
@@ -1168,11 +1239,20 @@ async function createLead(db2, input) {
   if (!pipeline) throw new Error("CRM not seeded: no pipelines. Run seedCrm().");
   const [stage] = await db2.select().from(stages).where(eq3(stages.pipelineId, pipeline.id)).orderBy(asc(stages.sort)).limit(1);
   return db2.transaction(async (tx) => {
-    const [contact] = await tx.insert(contacts).values({
-      firstName: input.contact.name,
-      email: input.contact.email,
-      phone: input.contact.phone
-    }).returning({ id: contacts.id });
+    let contactId = input.contactId ?? null;
+    if (contactId != null) {
+      const [existing] = await tx.select({ id: contacts.id }).from(contacts).where(eq3(contacts.id, contactId));
+      if (!existing) contactId = null;
+    }
+    if (contactId == null) {
+      const [created] = await tx.insert(contacts).values({
+        firstName: input.contact.name,
+        email: input.contact.email,
+        phone: input.contact.phone
+      }).returning({ id: contacts.id });
+      contactId = created.id;
+    }
+    const contact = { id: contactId };
     const [lead] = await tx.insert(leads).values({
       name: input.leadName,
       pipelineId: pipeline.id,
@@ -1241,9 +1321,11 @@ async function listLeads(db2, limit = 500) {
   const notesByLead = new Map(notesAgg.map((n) => [n.leadId, (n.text || "").slice(0, 1500)]));
   const lastEvent = await db2.select({
     leadId: leadEvents.leadId,
-    last: sql2`max(${leadEvents.createdAt})`
+    last: sql2`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} <> 'touch')`,
+    lastTouch: sql2`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} = 'touch')`
   }).from(leadEvents).groupBy(leadEvents.leadId);
   const stageSinceByLead = new Map(lastEvent.map((e) => [e.leadId, e.last]));
+  const lastTouchByLead = new Map(lastEvent.map((e) => [e.leadId, e.lastTouch]));
   const open = await db2.select({ leadId: leadTasks.leadId, dueAt: leadTasks.dueAt }).from(leadTasks).where(eq3(leadTasks.done, false));
   const now = Date.now();
   const byLead = /* @__PURE__ */ new Map();
@@ -1258,6 +1340,7 @@ async function listLeads(db2, limit = 500) {
     openTasks: byLead.get(r.id)?.open ?? 0,
     overdueTasks: byLead.get(r.id)?.overdue ?? 0,
     stageSince: stageSinceByLead.get(r.id) ?? null,
+    lastTouchAt: lastTouchByLead.get(r.id) ?? null,
     notesText: notesByLead.get(r.id) ?? ""
   }));
 }
@@ -1293,6 +1376,20 @@ async function getLead(db2, id) {
   const stagesForPipe = pipe.find((p) => p.key === row.pipelineKey)?.stages ?? [];
   return { ...row, notes, tasks, events, stages: stagesForPipe };
 }
+var TOUCH_LABELS = {
+  call: "\u{1F4DE} \u0417\u0432\u043E\u043D\u043E\u043A",
+  message: "\u{1F4AC} \u0421\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435",
+  meet: "\u{1F91D} \u0412\u0441\u0442\u0440\u0435\u0447\u0430"
+};
+async function addTouch(db2, leadId, kind) {
+  const label = TOUCH_LABELS[kind];
+  if (!label) return null;
+  const [lead] = await db2.select({ id: leads.id }).from(leads).where(eq3(leads.id, leadId));
+  if (!lead) return null;
+  await db2.insert(leadEvents).values({ leadId, type: "touch", toStage: label });
+  await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq3(leads.id, leadId));
+  return { id: leadId, label };
+}
 async function addNote(db2, leadId, text2) {
   if (!text2.trim()) return null;
   const [n] = await db2.insert(leadNotes).values({ leadId, text: text2.trim() }).returning({ id: leadNotes.id });
@@ -1323,6 +1420,21 @@ async function listContacts(db2, limit = 1e3) {
     openLeads: sql2`(count(${leads.id}) filter (where ${leads.status} = 'open'))::int`,
     lastLeadId: sql2`max(${leads.id})`
   }).from(contacts).leftJoin(leads, eq3(leads.contactId, contacts.id)).groupBy(contacts.id).orderBy(asc(contacts.firstName), asc(contacts.id)).limit(limit);
+}
+async function mergeContacts(db2, keepId, mergeId) {
+  if (keepId === mergeId) return null;
+  const [keep] = await db2.select().from(contacts).where(eq3(contacts.id, keepId));
+  const [dupe] = await db2.select().from(contacts).where(eq3(contacts.id, mergeId));
+  if (!keep || !dupe) return null;
+  return db2.transaction(async (tx) => {
+    const moved = await tx.update(leads).set({ contactId: keepId }).where(eq3(leads.contactId, mergeId)).returning({ id: leads.id });
+    const fill = {};
+    if (!keep.email && dupe.email) fill.email = dupe.email;
+    if (!keep.phone && dupe.phone) fill.phone = dupe.phone;
+    if (Object.keys(fill).length) await tx.update(contacts).set(fill).where(eq3(contacts.id, keepId));
+    await tx.delete(contacts).where(eq3(contacts.id, mergeId));
+    return { keepId, mergedLeads: moved.length };
+  });
 }
 async function listTasks(db2, opts = {}) {
   const { done = false, limit = 300 } = opts;
@@ -1422,6 +1534,17 @@ async function updateLead(db2, id, patch) {
   const [row] = await db2.update(leads).set(set).where(eq3(leads.id, id)).returning({ id: leads.id });
   if (row && stageEvent) {
     await db2.insert(leadEvents).values({ leadId: id, type: "stage", ...stageEvent });
+    const reason = typeof patch.lostReason === "string" ? patch.lostReason : "";
+    if (set.status === "lost" && /передумал|не отвечает/i.test(reason)) {
+      const due = /* @__PURE__ */ new Date();
+      due.setUTCDate(due.getUTCDate() + 30);
+      due.setUTCHours(0, 0, 0, 0);
+      await db2.insert(leadTasks).values({
+        leadId: id,
+        title: "\u{1F501} \u0420\u0435\u0430\u043D\u0438\u043C\u0430\u0446\u0438\u044F: \u0441\u043F\u0440\u043E\u0441\u0438\u0442\u044C \u0435\u0449\u0451 \u0440\u0430\u0437 (\u0430\u0432\u0442\u043E, 30 \u0434\u043D \u043F\u043E\u0441\u043B\u0435 \u043F\u043E\u0442\u0435\u0440\u0438)",
+        dueAt: due
+      });
+    }
   }
   return row ?? null;
 }
@@ -1437,8 +1560,39 @@ async function verifyLogin(db2, email, password) {
   return { id: u2.id, email: u2.email, name: u2.name, role: u2.role };
 }
 
+// src/lib/views.ts
+import { eq as eq5, sql as sql3 } from "drizzle-orm";
+function bangkokDay(offsetDays = 0) {
+  return new Date(Date.now() + 7 * 36e5 + offsetDays * 864e5).toISOString().slice(0, 10);
+}
+async function trackView(db2, rwNumber) {
+  const found = await db2.select({ id: objects.id }).from(objects).where(eq5(objects.rwNumber, rwNumber)).limit(1);
+  if (found.length === 0) return false;
+  await db2.insert(objectViewsDaily).values({ rwNumber, day: bangkokDay(), views: 1 }).onConflictDoUpdate({
+    target: [objectViewsDaily.rwNumber, objectViewsDaily.day],
+    set: { views: sql3`${objectViewsDaily.views} + 1` }
+  });
+  return true;
+}
+async function viewsSummary(db2) {
+  const from7 = bangkokDay(-6);
+  const from30 = bangkokDay(-29);
+  const rows = await db2.select({
+    rwNumber: objectViewsDaily.rwNumber,
+    d7: sql3`coalesce(sum(${objectViewsDaily.views}) filter (where ${objectViewsDaily.day} >= ${from7}), 0)`,
+    d30: sql3`coalesce(sum(${objectViewsDaily.views}) filter (where ${objectViewsDaily.day} >= ${from30}), 0)`,
+    total: sql3`sum(${objectViewsDaily.views})`
+  }).from(objectViewsDaily).groupBy(objectViewsDaily.rwNumber);
+  return rows.map((r) => ({
+    rwNumber: r.rwNumber,
+    d7: Number(r.d7),
+    d30: Number(r.d30),
+    total: Number(r.total)
+  }));
+}
+
 // src/lib/articles.ts
-import { eq as eq5, and as and2, desc as desc2, sql as sql3, inArray } from "drizzle-orm";
+import { eq as eq6, and as and2, desc as desc2, sql as sql4, inArray } from "drizzle-orm";
 var ArticleInputError = class extends Error {
 };
 var STATUSES = ["pending", "published", "rejected"];
@@ -1460,8 +1614,8 @@ async function createArticle(db2, input) {
   let slug = input.slug?.trim() || slugify(title) || `article-${Date.now()}`;
   const existing = await db2.select({ slug: articles.slug }).from(articles).where(
     and2(
-      eq5(articles.lang, lang),
-      sql3`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
+      eq6(articles.lang, lang),
+      sql4`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
     )
   );
   if (existing.some((r) => r.slug === slug)) {
@@ -1486,24 +1640,24 @@ async function createArticle(db2, input) {
 }
 async function listArticles(db2, opts = {}) {
   const conds = [];
-  if (opts.status) conds.push(eq5(articles.status, opts.status));
-  if (opts.lang) conds.push(eq5(articles.lang, opts.lang));
-  return db2.select().from(articles).where(conds.length ? and2(...conds) : void 0).orderBy(desc2(sql3`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
+  if (opts.status) conds.push(eq6(articles.status, opts.status));
+  if (opts.lang) conds.push(eq6(articles.lang, opts.lang));
+  return db2.select().from(articles).where(conds.length ? and2(...conds) : void 0).orderBy(desc2(sql4`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
 }
 async function getArticleById(db2, id) {
-  const [row] = await db2.select().from(articles).where(eq5(articles.id, id)).limit(1);
+  const [row] = await db2.select().from(articles).where(eq6(articles.id, id)).limit(1);
   return row ?? null;
 }
 async function getArticleBySlug(db2, slug, lang) {
-  const conds = [eq5(articles.slug, slug)];
-  if (lang) conds.push(eq5(articles.lang, lang));
+  const conds = [eq6(articles.slug, slug)];
+  if (lang) conds.push(eq6(articles.lang, lang));
   const [row] = await db2.select().from(articles).where(and2(...conds)).limit(1);
   return row ?? null;
 }
 async function countPending(db2, lang) {
-  const conds = [eq5(articles.status, "pending")];
-  if (lang) conds.push(eq5(articles.lang, lang));
-  const [r] = await db2.select({ n: sql3`count(*)::int` }).from(articles).where(and2(...conds));
+  const conds = [eq6(articles.status, "pending")];
+  if (lang) conds.push(eq6(articles.lang, lang));
+  const [r] = await db2.select({ n: sql4`count(*)::int` }).from(articles).where(and2(...conds));
   return r?.n ?? 0;
 }
 async function updateArticle(db2, id, patch) {
@@ -1523,16 +1677,16 @@ async function updateArticle(db2, id, patch) {
   }
   if (patch.takeaways !== void 0) set.takeaways = patch.takeaways;
   if (patch.coverImage !== void 0) set.coverImage = patch.coverImage;
-  const [row] = await db2.update(articles).set(set).where(eq5(articles.id, id)).returning();
+  const [row] = await db2.update(articles).set(set).where(eq6(articles.id, id)).returning();
   return row ?? null;
 }
 async function deleteArticle(db2, id) {
-  const res = await db2.delete(articles).where(eq5(articles.id, id)).returning({ id: articles.id });
+  const res = await db2.delete(articles).where(eq6(articles.id, id)).returning({ id: articles.id });
   return res.length > 0;
 }
 
 // src/lib/contact-bot.ts
-import { eq as eq6 } from "drizzle-orm";
+import { eq as eq7 } from "drizzle-orm";
 var SITE = "https://rightwaygroup.co";
 var FLOOD_WINDOW_MS = 6e4;
 var FLOOD_MAX = 16;
@@ -1584,7 +1738,7 @@ async function handleContactUpdate(db2, update, cfg) {
   if (!msg || !msg.from || msg.from.is_bot) return;
   if (msg.from.id === cfg.ownerId) {
     if (!msg.reply_to_message) return;
-    const rows = await db2.select().from(contactThreads).where(eq6(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
+    const rows = await db2.select().from(contactThreads).where(eq7(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
     const thread = rows[0];
     if (!thread) {
       await tg(cfg, "sendMessage", {
@@ -1626,7 +1780,7 @@ async function handleContactUpdate(db2, update, cfg) {
       return;
     }
   }
-  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq6(contactThreads.clientChatId, msg.chat.id));
+  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq7(contactThreads.clientChatId, msg.chat.id));
   const firstContact = history.length === 0;
   const cutoff = new Date(Date.now() - FLOOD_WINDOW_MS);
   const recent = history.filter((h2) => h2.createdAt > cutoff).length;
@@ -1690,6 +1844,106 @@ ${problems.join("\n")}`,
     });
   }
   return { healthy: problems.length === 0, problems };
+}
+
+// src/lib/valuation.ts
+import { eq as eq8, desc as desc3 } from "drizzle-orm";
+var ValuationInputError = class extends Error {
+};
+async function listFactorOverrides(db2) {
+  return db2.select().from(valuationFactors);
+}
+async function setFactorOverrides(db2, entries) {
+  for (const e of entries) {
+    const key = String(e.key ?? "").trim();
+    if (!key) throw new ValuationInputError("factor key is required");
+    if (e.value === null) {
+      await db2.delete(valuationFactors).where(eq8(valuationFactors.key, key));
+      continue;
+    }
+    const value = Number(e.value);
+    if (!Number.isFinite(value)) throw new ValuationInputError(`factor ${key}: value is not a number`);
+    await db2.insert(valuationFactors).values({ key, value, updatedAt: /* @__PURE__ */ new Date() }).onConflictDoUpdate({
+      target: valuationFactors.key,
+      set: { value, updatedAt: /* @__PURE__ */ new Date() }
+    });
+  }
+}
+var COMP_TYPES = ["Land", "Villa", "House", "Apartment"];
+var COMP_STATUSES = ["active", "sold", "gone"];
+async function listComps(db2) {
+  return db2.select().from(valuationComps).orderBy(desc3(valuationComps.createdAt));
+}
+async function addComp(db2, input) {
+  const priceThb = Number(input.priceThb);
+  if (!Number.isFinite(priceThb) || priceThb <= 0) {
+    throw new ValuationInputError("priceThb must be a positive number");
+  }
+  const type = COMP_TYPES.includes(input.type) ? input.type : "Land";
+  const status = COMP_STATUSES.includes(input.status) ? input.status : "active";
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const txt = (v) => typeof v === "string" && v.trim() ? v.trim() : null;
+  const [row] = await db2.insert(valuationComps).values({
+    type,
+    status,
+    priceThb,
+    district: txt(input.district),
+    areaRai: num(input.areaRai),
+    builtSqm: num(input.builtSqm),
+    bedrooms: num(input.bedrooms),
+    documentType: txt(input.documentType),
+    seaView: !!input.seaView,
+    beachfront: !!input.beachfront,
+    electricity: !!input.electricity,
+    roadType: txt(input.roadType),
+    terrain: txt(input.terrain),
+    zone: txt(input.zone),
+    sourceUrl: txt(input.sourceUrl),
+    note: txt(input.note),
+    seenAt: txt(input.seenAt)
+  }).returning();
+  return row;
+}
+async function updateComp(db2, id, patch) {
+  const set = {};
+  if (patch.status !== void 0) {
+    if (!COMP_STATUSES.includes(patch.status)) {
+      throw new ValuationInputError(`unknown comp status: ${patch.status}`);
+    }
+    set.status = patch.status;
+  }
+  if (patch.note !== void 0) set.note = patch.note?.trim() || null;
+  if (Object.keys(set).length === 0) return null;
+  const [row] = await db2.update(valuationComps).set(set).where(eq8(valuationComps.id, id)).returning();
+  return row ?? null;
+}
+async function deleteComp(db2, id) {
+  const rows = await db2.delete(valuationComps).where(eq8(valuationComps.id, id)).returning();
+  return rows.length > 0;
+}
+async function logValuation(db2, input) {
+  if (!input.subject || !input.result) throw new ValuationInputError("subject and result are required");
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const [row] = await db2.insert(valuations).values({
+    rwNumber: input.rwNumber?.trim() || null,
+    subject: input.subject,
+    result: input.result,
+    fairValue: num(input.fairValue),
+    lowValue: num(input.lowValue),
+    highValue: num(input.highValue),
+    confidence: input.confidence?.trim() || null,
+    createdBy: input.createdBy?.trim() || null
+  }).returning();
+  return row;
+}
+async function listValuations(db2, limit = 20) {
+  return db2.select().from(valuations).orderBy(desc3(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
 }
 
 // src/api/app.ts
@@ -1795,6 +2049,20 @@ app.post("/objects/:rw/photos", async (c) => {
     return c.json({ error: "add photos failed" }, 500);
   }
 });
+app.post("/track/view", async (c) => {
+  try {
+    const { rw } = await c.req.json();
+    const ok = await trackView(db, String(rw ?? ""));
+    return c.json({ ok });
+  } catch (err) {
+    console.error("[POST /track/view]", err.message);
+    return c.json({ ok: false }, 500);
+  }
+});
+app.get("/views/summary", async (c) => {
+  const data = await viewsSummary(db);
+  return c.json(data);
+});
 app.post("/leads", async (c) => {
   try {
     const input = await c.req.json();
@@ -1875,6 +2143,21 @@ app.get("/contacts", async (c) => {
   const limit = Math.min(Number(c.req.query("limit")) || 1e3, 2e3);
   return c.json(await listContacts(db, limit));
 });
+app.post("/contacts/merge", async (c) => {
+  try {
+    const { keepId, mergeId } = await c.req.json();
+    const res = await mergeContacts(db, Number(keepId), Number(mergeId));
+    return res ? c.json(res) : c.json({ error: "not found or same id" }, 400);
+  } catch (err) {
+    console.error("[POST /contacts/merge]", err);
+    return c.json({ error: "merge failed" }, 500);
+  }
+});
+app.post("/leads/:id/touch", async (c) => {
+  const { kind } = await c.req.json();
+  const res = await addTouch(db, Number(c.req.param("id")), String(kind ?? ""));
+  return res ? c.json(res, 201) : c.json({ error: "bad kind or lead" }, 400);
+});
 app.get("/articles", async (c) => {
   const status = c.req.query("status");
   const lang = c.req.query("lang") || void 0;
@@ -1918,6 +2201,64 @@ app.patch("/articles/:id", async (c) => {
 app.delete("/articles/:id", async (c) => {
   const ok = await deleteArticle(db, Number(c.req.param("id")));
   return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+app.get("/valuation/factors", async (c) => {
+  const rows = await listFactorOverrides(db);
+  return c.json(rows);
+});
+app.put("/valuation/factors", async (c) => {
+  try {
+    const body = await c.req.json();
+    const entries = Array.isArray(body) ? body : body?.factors;
+    if (!Array.isArray(entries)) return c.json({ error: "expected array of {key,value}" }, 400);
+    await setFactorOverrides(db, entries);
+    return c.json(await listFactorOverrides(db));
+  } catch (err) {
+    if (err instanceof ValuationInputError) return c.json({ error: err.message }, 400);
+    console.error("[PUT /valuation/factors]", err);
+    return c.json({ error: "save failed" }, 500);
+  }
+});
+app.get("/valuation/comps", async (c) => {
+  return c.json(await listComps(db));
+});
+app.post("/valuation/comps", async (c) => {
+  try {
+    const row = await addComp(db, await c.req.json());
+    return c.json(row, 201);
+  } catch (err) {
+    if (err instanceof ValuationInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /valuation/comps]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+app.patch("/valuation/comps/:id", async (c) => {
+  try {
+    const row = await updateComp(db, Number(c.req.param("id")), await c.req.json());
+    return row ? c.json(row) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    if (err instanceof ValuationInputError) return c.json({ error: err.message }, 400);
+    console.error("[PATCH /valuation/comps]", err);
+    return c.json({ error: "update failed" }, 500);
+  }
+});
+app.delete("/valuation/comps/:id", async (c) => {
+  const ok = await deleteComp(db, Number(c.req.param("id")));
+  return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+app.get("/valuations", async (c) => {
+  const limit = Number(c.req.query("limit") ?? 20);
+  return c.json(await listValuations(db, Number.isFinite(limit) ? limit : 20));
+});
+app.post("/valuations", async (c) => {
+  try {
+    const row = await logValuation(db, await c.req.json());
+    return c.json(row, 201);
+  } catch (err) {
+    if (err instanceof ValuationInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /valuations]", err);
+    return c.json({ error: "log failed" }, 500);
+  }
 });
 
 // src/api/vercel-entry.ts

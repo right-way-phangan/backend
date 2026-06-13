@@ -20,14 +20,19 @@ import { createObject, updateObject, addObjectPhotos, ObjectInputError } from ".
 import {
   createLead, listLeads, listPipelines, updateLead, seedCrm,
   getLead, addNote, addTask, updateTask, listTasks, updateLeadContact, deleteLead,
-  listEvents, listContacts,
+  listEvents, listContacts, addTouch, mergeContacts,
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
+import { trackView, viewsSummary } from "../lib/views";
 import {
   createArticle, listArticles, getArticleById, getArticleBySlug,
   updateArticle, deleteArticle, countPending, ArticleInputError,
 } from "../lib/articles";
 import { handleContactUpdate, contactSelfCheck, type ContactBotConfig } from "../lib/contact-bot";
+import {
+  listFactorOverrides, setFactorOverrides, listComps, addComp, updateComp, deleteComp,
+  logValuation, listValuations, ValuationInputError,
+} from "../lib/valuation";
 
 const API_TOKEN = process.env.API_TOKEN;
 const ON_VERCEL = !!process.env.VERCEL;
@@ -174,6 +179,26 @@ app.post("/objects/:rw/photos", async (c) => {
   }
 });
 
+// ---- First-party listing views ----
+
+/** +1 view for an object (the website's /api/track-view proxy POSTs here). */
+app.post("/track/view", async (c) => {
+  try {
+    const { rw } = await c.req.json();
+    const ok = await trackView(db, String(rw ?? ""));
+    return c.json({ ok });
+  } catch (err) {
+    console.error("[POST /track/view]", (err as Error).message);
+    return c.json({ ok: false }, 500);
+  }
+});
+
+/** Per-object view counts (7d/30d/total) — /admin/objects column. */
+app.get("/views/summary", async (c) => {
+  const data = await viewsSummary(db);
+  return c.json(data);
+});
+
 // ---- CRM (Phase B): lead capture ----
 
 /** Create a lead (+contact +note). Website forms POST here instead of amoCRM. */
@@ -280,6 +305,25 @@ app.get("/contacts", async (c) => {
   return c.json(await listContacts(db, limit));
 });
 
+/** Merge duplicate contacts: { keepId, mergeId } — leads re-pointed, dupe deleted. */
+app.post("/contacts/merge", async (c) => {
+  try {
+    const { keepId, mergeId } = await c.req.json();
+    const res = await mergeContacts(db, Number(keepId), Number(mergeId));
+    return res ? c.json(res) : c.json({ error: "not found or same id" }, 400);
+  } catch (err) {
+    console.error("[POST /contacts/merge]", err);
+    return c.json({ error: "merge failed" }, 500);
+  }
+});
+
+/** One-tap touch log: { kind: call|message|meet } → timeline + lastTouchAt. */
+app.post("/leads/:id/touch", async (c) => {
+  const { kind } = await c.req.json();
+  const res = await addTouch(db, Number(c.req.param("id")), String(kind ?? ""));
+  return res ? c.json(res, 201) : c.json({ error: "bad kind or lead" }, 400);
+});
+
 // ─── Blog articles (content pipeline + review-gate) ───
 
 /** List articles. Query: ?status=pending|published|rejected &lang=en|ru */
@@ -337,4 +381,76 @@ app.patch("/articles/:id", async (c) => {
 app.delete("/articles/:id", async (c) => {
   const ok = await deleteArticle(db, Number(c.req.param("id")));
   return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+
+// ---- «RW Оценка» — состояние оценщика (движок считает в web) ----
+
+/** Переопределения коэффициентов (пусто = дефолты движка). */
+app.get("/valuation/factors", async (c) => {
+  const rows = await listFactorOverrides(db);
+  return c.json(rows);
+});
+
+/** Bulk-сохранение: [{key, value}] ; value=null снимает переопределение. */
+app.put("/valuation/factors", async (c) => {
+  try {
+    const body = await c.req.json();
+    const entries = Array.isArray(body) ? body : body?.factors;
+    if (!Array.isArray(entries)) return c.json({ error: "expected array of {key,value}" }, 400);
+    await setFactorOverrides(db, entries);
+    return c.json(await listFactorOverrides(db));
+  } catch (err) {
+    if (err instanceof ValuationInputError) return c.json({ error: err.message }, 400);
+    console.error("[PUT /valuation/factors]", err);
+    return c.json({ error: "save failed" }, 500);
+  }
+});
+
+/** Внешние компсы (ручной ввод; каталог движок читает из /objects/all). */
+app.get("/valuation/comps", async (c) => {
+  return c.json(await listComps(db));
+});
+
+app.post("/valuation/comps", async (c) => {
+  try {
+    const row = await addComp(db, await c.req.json());
+    return c.json(row, 201);
+  } catch (err) {
+    if (err instanceof ValuationInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /valuation/comps]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+
+app.patch("/valuation/comps/:id", async (c) => {
+  try {
+    const row = await updateComp(db, Number(c.req.param("id")), await c.req.json());
+    return row ? c.json(row) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    if (err instanceof ValuationInputError) return c.json({ error: err.message }, 400);
+    console.error("[PATCH /valuation/comps]", err);
+    return c.json({ error: "update failed" }, 500);
+  }
+});
+
+app.delete("/valuation/comps/:id", async (c) => {
+  const ok = await deleteComp(db, Number(c.req.param("id")));
+  return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+
+/** Журнал оценок: web пишет каждую выполненную оценку (история/калибровка). */
+app.get("/valuations", async (c) => {
+  const limit = Number(c.req.query("limit") ?? 20);
+  return c.json(await listValuations(db, Number.isFinite(limit) ? limit : 20));
+});
+
+app.post("/valuations", async (c) => {
+  try {
+    const row = await logValuation(db, await c.req.json());
+    return c.json(row, 201);
+  } catch (err) {
+    if (err instanceof ValuationInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /valuations]", err);
+    return c.json({ error: "log failed" }, 500);
+  }
 });
