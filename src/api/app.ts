@@ -25,6 +25,7 @@ import {
   listEvents, listContacts, addTouch, addShortlistView, mergeContacts,
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
+import { recordSearch, demandSummary } from "../lib/demand";
 import { trackView, viewsSummary } from "../lib/views";
 import {
   createArticle, listArticles, getArticleById, getArticleBySlug,
@@ -204,6 +205,27 @@ app.post("/track/view", async (c) => {
 /** Per-object view counts (7d/30d/total) — /admin/objects column. */
 app.get("/views/summary", async (c) => {
   const data = await viewsSummary(db);
+  return c.json(data);
+});
+
+// ---- Demand intelligence (search/filter signals) ----
+
+/** Record a search/filter event (web logs NL search server-side + filter beacon). */
+app.post("/track/search", async (c) => {
+  try {
+    const input = await c.req.json();
+    const id = await recordSearch(db, input ?? {});
+    return c.json({ ok: true, id });
+  } catch (err) {
+    console.error("[POST /track/search]", (err as Error).message);
+    return c.json({ ok: false }, 500);
+  }
+});
+
+/** Aggregated demand summary — /admin/demand. ?days=N window (default 90). */
+app.get("/demand/summary", async (c) => {
+  const days = Math.min(Math.max(Number(c.req.query("days")) || 90, 1), 365);
+  const data = await demandSummary(db, days);
   return c.json(data);
 });
 

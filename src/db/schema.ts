@@ -240,6 +240,39 @@ export const objectViewsDaily = pgTable(
   (t) => ({ pk: primaryKey({ columns: [t.rwNumber, t.day] }) }),
 );
 
+/**
+ * Demand intelligence — what visitors search/filter for on /listings, so we can
+ * compare DEMAND against our INVENTORY and know what to acquire. One row per
+ * search event:
+ *  - kind 'nl'     — natural-language search (query + whether it matched);
+ *  - kind 'filter' — a settled filter selection on the listings bar.
+ * The interpreted intent is stored structurally (districts/types/features/price/
+ * beds) so /admin/demand can aggregate it. No visitor identity — pure aggregate
+ * signal. `resultCount` records how many listings the query/filter returned, so
+ * "zero-result" demand (people wanting what we don't have) is visible.
+ */
+export const searchEvents = pgTable(
+  "search_events",
+  {
+    id: serial("id").primaryKey(),
+    kind: text("kind").notNull().default("filter"), // nl | filter
+    query: text("query"), // raw NL phrase (kind=nl)
+    matched: boolean("matched"), // did the NL query map to any filter? (kind=nl)
+    types: text("types").array(),
+    districts: text("districts").array(),
+    tenure: text("tenure").array(),
+    features: text("features").array(), // beachfront | seaView | mountainView
+    priceMinM: doublePrecision("price_min_m"), // millions THB
+    priceMaxM: doublePrecision("price_max_m"),
+    bedroomsMin: doublePrecision("bedrooms_min"),
+    resultCount: integer("result_count"),
+    locale: text("locale"), // en | ru
+    day: text("day").notNull(), // YYYY-MM-DD, Asia/Bangkok
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ createdIdx: index("search_events_created_idx").on(t.createdAt) }),
+);
+
 export type ObjectRow = typeof objects.$inferSelect;
 export type ObjectInsert = typeof objects.$inferInsert;
 
