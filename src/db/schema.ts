@@ -30,6 +30,7 @@ import {
   timestamp,
   index,
   uniqueIndex,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 
 export const objects = pgTable(
@@ -219,6 +220,24 @@ export const projectUnits = pgTable(
     note: text("note"),
   },
   (t) => ({ objIdx: index("project_units_object_idx").on(t.objectId) }),
+);
+
+/**
+ * First-party listing view counters — one row per (object, Bangkok day).
+ * Written by the site beacon (web /api/track-view → POST /track/view here), so
+ * the "what do visitors actually open" signal survives ad-blockers and Safari
+ * ITP, unlike GA4. Deliberately a daily counter: no visitor identity, no raw
+ * hits, nothing to consent-manage. Keyed by rw_number (not object id) because
+ * that's the public identifier the beacon knows.
+ */
+export const objectViewsDaily = pgTable(
+  "object_views_daily",
+  {
+    rwNumber: text("rw_number").notNull(),
+    day: text("day").notNull(), // YYYY-MM-DD, Asia/Bangkok (UTC+7, no DST)
+    views: integer("views").notNull().default(0),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.rwNumber, t.day] }) }),
 );
 
 export type ObjectRow = typeof objects.$inferSelect;
