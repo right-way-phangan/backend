@@ -26,7 +26,8 @@ import {
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
 import { recordSearch, demandSummary } from "../lib/demand";
-import { trackView, viewsSummary } from "../lib/views";
+import { trackView, viewsSummary, crossShopperCount } from "../lib/views";
+import { trackEvent, eventsSummary, trackReferral, referralsSummary } from "../lib/events";
 import {
   createArticle, listArticles, getArticleById, getArticleBySlug,
   updateArticle, deleteArticle, countPending, ArticleInputError,
@@ -190,11 +191,12 @@ app.post("/objects/:rw/photos", async (c) => {
 
 // ---- First-party listing views ----
 
-/** +1 view for an object (the website's /api/track-view proxy POSTs here). */
+/** +1 view for an object (the website's /api/track-view proxy POSTs here).
+ *  Optional vid (anonymous browser id) feeds unique-viewer + cross-shopping. */
 app.post("/track/view", async (c) => {
   try {
-    const { rw } = await c.req.json();
-    const ok = await trackView(db, String(rw ?? ""));
+    const { rw, vid } = await c.req.json();
+    const ok = await trackView(db, String(rw ?? ""), vid ? String(vid) : undefined);
     return c.json({ ok });
   } catch (err) {
     console.error("[POST /track/view]", (err as Error).message);
@@ -202,10 +204,53 @@ app.post("/track/view", async (c) => {
   }
 });
 
-/** Per-object view counts (7d/30d/total) — /admin/objects column. */
+/** Per-object view counts (7d/30d/total + unique 30d) — /admin/objects column. */
 app.get("/views/summary", async (c) => {
   const data = await viewsSummary(db);
   return c.json(data);
+});
+
+/** Visitors who viewed ≥2 objects in 30d (cross-shoppers) — CRM stats. */
+app.get("/views/cross-shoppers", async (c) => {
+  return c.json({ count: await crossShopperCount(db) });
+});
+
+// ---- Engagement events (contact clicks, save/calc/brochure/share, forms) ----
+
+/** +1 engagement event. Web beacons clicks/saves/calc/brochure/share/forms here. */
+app.post("/track/event", async (c) => {
+  try {
+    const { rw, kind } = await c.req.json();
+    const ok = await trackEvent(db, String(rw ?? ""), String(kind ?? ""));
+    return c.json({ ok });
+  } catch (err) {
+    console.error("[POST /track/event]", (err as Error).message);
+    return c.json({ ok: false }, 500);
+  }
+});
+
+/** Per (object, kind) event counts (7d/30d) — engagement index + click funnel. */
+app.get("/events/summary", async (c) => {
+  return c.json(await eventsSummary(db));
+});
+
+// ---- Referral channels (AI assistants / search / social) ----
+
+/** +1 referral for a classified landing source (once per session, from web). */
+app.post("/track/referral", async (c) => {
+  try {
+    const { source } = await c.req.json();
+    const ok = await trackReferral(db, String(source ?? ""));
+    return c.json({ ok });
+  } catch (err) {
+    console.error("[POST /track/referral]", (err as Error).message);
+    return c.json({ ok: false }, 500);
+  }
+});
+
+/** Referral sources by visit counts (7d/30d) — AI/search/social breakdown. */
+app.get("/referrals/summary", async (c) => {
+  return c.json(await referralsSummary(db));
 });
 
 // ---- Demand intelligence (search/filter signals) ----

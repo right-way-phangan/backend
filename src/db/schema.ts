@@ -273,6 +273,60 @@ export const searchEvents = pgTable(
   (t) => ({ createdIdx: index("search_events_created_idx").on(t.createdAt) }),
 );
 
+/**
+ * Engagement events — first-party counter for every signal beyond a raw view,
+ * so the admin can rank TRUE interest and count the messenger-first conversions
+ * GA4 can't tie to outcomes. One row per (object, kind, Bangkok day):
+ *  - contact clicks: wa_click | tg_click | phone_click | email_click (the
+ *    dominant conversion path for a DM-first Phangan audience);
+ *  - object engagement: save | calc | brochure | share;
+ *  - site-level forms: form_start | form_submit (rw_number = '__site__').
+ * Daily counts only — no identity. Powers the engagement index (/admin/objects)
+ * and the messenger-click funnel step (/admin/crm/stats).
+ */
+export const objectEventsDaily = pgTable(
+  "object_events_daily",
+  {
+    rwNumber: text("rw_number").notNull(), // '__site__' for non-object events
+    kind: text("kind").notNull(),
+    day: text("day").notNull(), // YYYY-MM-DD, Asia/Bangkok
+    count: integer("count").notNull().default(0),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.rwNumber, t.kind, t.day] }) }),
+);
+
+/**
+ * Anonymous unique-viewer rows — makes the view counter honest (10 views by 1
+ * person ≠ 10 people) and reveals cross-shopping (one visitor viewing several
+ * objects = hot). `vid` is a random rotating id in the browser's localStorage —
+ * no personal data, no cross-site identity. One row per (object, vid, day).
+ */
+export const objectViewVisitors = pgTable(
+  "object_view_visitors",
+  {
+    rwNumber: text("rw_number").notNull(),
+    vid: text("vid").notNull(),
+    day: text("day").notNull(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.rwNumber, t.vid, t.day] }) }),
+);
+
+/**
+ * Referral channels — once-per-session landing referrer, classified (e.g.
+ * AI assistants: Perplexity / ChatGPT / Gemini). Lets us MEASURE the GEO/AEO
+ * bet ("found via AI") as a number, not a slogan, independent of GA4. Daily
+ * count by source; no identity.
+ */
+export const referralsDaily = pgTable(
+  "referrals_daily",
+  {
+    source: text("source").notNull(), // ai:perplexity | search:google | social:telegram | direct | …
+    day: text("day").notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.source, t.day] }) }),
+);
+
 export type ObjectRow = typeof objects.$inferSelect;
 export type ObjectInsert = typeof objects.$inferInsert;
 

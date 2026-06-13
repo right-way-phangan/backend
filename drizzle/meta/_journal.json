@@ -113,6 +113,13 @@
       "when": 1781349056471,
       "tag": "0015_volatile_deathstrike",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1781374195632,
+      "tag": "0016_wandering_wolf_cub",
+      "breakpoints": true
     }
   ]
 }
