@@ -16,6 +16,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createDb } from "../db/connect";
 import { getPublicObjects, getAllObjects } from "../lib/queries";
+import { recentObjectMatches } from "../lib/matching";
 import { createObject, updateObject, addObjectPhotos, ObjectInputError } from "../lib/write";
 import {
   createLead, listLeads, listPipelines, updateLead, seedCrm,
@@ -133,6 +134,12 @@ app.get("/objects", async (c) => {
 app.get("/objects/all", async (c) => {
   const data = await getAllObjects(db);
   return c.json(data);
+});
+
+/** Recently-added Active objects with their matching open leads — morning ping. */
+app.get("/objects/recent-matches", async (c) => {
+  const hours = Math.min(Number(c.req.query("hours")) || 24, 168);
+  return c.json(await recentObjectMatches(db, hours));
 });
 
 app.get("/objects/:rw", async (c) => {

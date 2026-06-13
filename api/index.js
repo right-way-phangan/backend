@@ -637,8 +637,454 @@ async function getAllObjects(db2) {
   return [...all.filter((o) => o.rwNumber), ...units];
 }
 
+// src/lib/matching.ts
+import { and as and2, eq as eq3, gte as gte2 } from "drizzle-orm";
+
+// src/lib/crm.ts
+import { eq as eq2, and, asc, desc, gte, sql } from "drizzle-orm";
+var PIPELINES = [
+  { key: "land", name: "Land", sort: 0 },
+  { key: "villa_house", name: "Villas & Houses", sort: 1 },
+  // Imported Circle-era leads land here for manual triage; revived ones are
+  // re-created in a working pipeline, dead ones closed in place.
+  { key: "legacy", name: "\u0420\u0430\u0437\u0431\u043E\u0440 (legacy)", sort: 9 }
+];
+var DEAL_STAGES = [
+  { key: "incoming", name: "Incoming", sort: 0, isWon: false, isLost: false },
+  { key: "contacted", name: "Contacted", sort: 1, isWon: false, isLost: false },
+  { key: "qualified", name: "Qualified", sort: 2, isWon: false, isLost: false },
+  { key: "viewing", name: "Viewing", sort: 3, isWon: false, isLost: false },
+  { key: "negotiation", name: "Offer / Negotiation", sort: 4, isWon: false, isLost: false },
+  { key: "reservation", name: "Reservation", sort: 5, isWon: false, isLost: false },
+  { key: "dd", name: "Due Diligence", sort: 6, isWon: false, isLost: false },
+  { key: "spa", name: "Contract (SPA)", sort: 7, isWon: false, isLost: false },
+  { key: "transfer", name: "Transfer", sort: 8, isWon: false, isLost: false },
+  { key: "won", name: "Won", sort: 9, isWon: true, isLost: false },
+  { key: "lost", name: "Lost", sort: 10, isWon: false, isLost: true }
+];
+var LEGACY_STAGES = [
+  { key: "incoming", name: "\u0420\u0430\u0437\u043E\u0431\u0440\u0430\u0442\u044C", sort: 0, isWon: false, isLost: false },
+  { key: "contacted", name: "\u0421\u0432\u044F\u0437\u0430\u043B\u0438\u0441\u044C", sort: 1, isWon: false, isLost: false },
+  { key: "revived", name: "\u0420\u0435\u0430\u043D\u0438\u043C\u0438\u0440\u043E\u0432\u0430\u043D \u2192 \u0432 \u0440\u0430\u0431\u043E\u0442\u0443", sort: 2, isWon: false, isLost: false },
+  { key: "dead", name: "\u041C\u0451\u0440\u0442\u0432", sort: 3, isWon: false, isLost: true }
+];
+function stagesFor(pipelineKey) {
+  return pipelineKey === "legacy" ? LEGACY_STAGES : DEAL_STAGES;
+}
+async function seedCrm(db2) {
+  for (const p of PIPELINES) {
+    await db2.insert(pipelines).values(p).onConflictDoNothing({ target: pipelines.key });
+  }
+  const pipes = await db2.select().from(pipelines);
+  for (const p of pipes) {
+    const canon = stagesFor(p.key);
+    const existing = await db2.select().from(stages).where(eq2(stages.pipelineId, p.id));
+    const byKey = new Map(existing.map((s) => [s.key, s]));
+    for (const s of canon) {
+      const cur = byKey.get(s.key);
+      if (!cur) {
+        await db2.insert(stages).values({ ...s, pipelineId: p.id });
+      } else if (cur.name !== s.name || cur.sort !== s.sort || cur.isWon !== s.isWon || cur.isLost !== s.isLost) {
+        await db2.update(stages).set({ name: s.name, sort: s.sort, isWon: s.isWon, isLost: s.isLost }).where(eq2(stages.id, cur.id));
+      }
+    }
+  }
+}
+async function createLead(db2, input) {
+  const [pipe] = await db2.select().from(pipelines).where(eq2(pipelines.key, input.pipeline)) ?? [];
+  const pipeline = pipe ?? (await db2.select().from(pipelines).where(eq2(pipelines.key, "land")))[0];
+  if (!pipeline) throw new Error("CRM not seeded: no pipelines. Run seedCrm().");
+  const [stage] = await db2.select().from(stages).where(eq2(stages.pipelineId, pipeline.id)).orderBy(asc(stages.sort)).limit(1);
+  return db2.transaction(async (tx) => {
+    let contactId = input.contactId ?? null;
+    if (contactId != null) {
+      const [existing] = await tx.select({ id: contacts.id }).from(contacts).where(eq2(contacts.id, contactId));
+      if (!existing) contactId = null;
+    }
+    if (contactId == null) {
+      const [created] = await tx.insert(contacts).values({
+        firstName: input.contact.name,
+        email: input.contact.email,
+        phone: input.contact.phone
+      }).returning({ id: contacts.id });
+      contactId = created.id;
+    }
+    const contact = { id: contactId };
+    const [lead] = await tx.insert(leads).values({
+      name: input.leadName,
+      pipelineId: pipeline.id,
+      stageId: stage?.id,
+      contactId: contact.id,
+      status: "open",
+      rwNumber: input.rwNumber,
+      source: input.source,
+      kind: input.kind,
+      tags: input.tags?.length ? input.tags : void 0,
+      updatedAt: /* @__PURE__ */ new Date()
+    }).returning({ id: leads.id });
+    if (input.note?.trim()) {
+      await tx.insert(leadNotes).values({ leadId: lead.id, text: input.note.trim() });
+    }
+    await tx.insert(leadEvents).values({
+      leadId: lead.id,
+      type: "created",
+      toStage: stage?.name ?? null
+    });
+    if (input.autoTask !== false) {
+      const due = /* @__PURE__ */ new Date();
+      due.setUTCDate(due.getUTCDate() + 1);
+      due.setUTCHours(3, 0, 0, 0);
+      await tx.insert(leadTasks).values({
+        leadId: lead.id,
+        title: "\u{1F4DE} \u0421\u0432\u044F\u0437\u0430\u0442\u044C\u0441\u044F \u0441 \u043B\u0438\u0434\u043E\u043C (\u0430\u0432\u0442\u043E)",
+        dueAt: due
+      });
+    }
+    return {
+      leadId: lead.id,
+      contactId: contact.id,
+      pipeline: pipeline.name,
+      stage: stage?.name ?? "\u2014"
+    };
+  });
+}
+async function listLeads(db2, limit = 500) {
+  const rows = await db2.select({
+    id: leads.id,
+    name: leads.name,
+    status: leads.status,
+    lostReason: leads.lostReason,
+    dealValue: leads.dealValue,
+    commissionValue: leads.commissionValue,
+    rwNumber: leads.rwNumber,
+    source: leads.source,
+    kind: leads.kind,
+    tags: leads.tags,
+    createdAt: leads.createdAt,
+    updatedAt: leads.updatedAt,
+    contactName: contacts.firstName,
+    email: contacts.email,
+    phone: contacts.phone,
+    pipeline: pipelines.name,
+    pipelineKey: pipelines.key,
+    stage: stages.name,
+    stageKey: stages.key,
+    stageId: stages.id
+  }).from(leads).leftJoin(contacts, eq2(leads.contactId, contacts.id)).leftJoin(pipelines, eq2(leads.pipelineId, pipelines.id)).leftJoin(stages, eq2(leads.stageId, stages.id)).orderBy(desc(leads.createdAt)).limit(limit);
+  const notesAgg = await db2.select({
+    leadId: leadNotes.leadId,
+    text: sql`string_agg(${leadNotes.text}, ' ')`
+  }).from(leadNotes).groupBy(leadNotes.leadId);
+  const notesByLead = new Map(notesAgg.map((n) => [n.leadId, (n.text || "").slice(0, 1500)]));
+  const lastEvent = await db2.select({
+    leadId: leadEvents.leadId,
+    last: sql`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} in ('created','stage'))`,
+    lastTouch: sql`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} = 'touch')`
+  }).from(leadEvents).groupBy(leadEvents.leadId);
+  const stageSinceByLead = new Map(lastEvent.map((e) => [e.leadId, e.last]));
+  const lastTouchByLead = new Map(lastEvent.map((e) => [e.leadId, e.lastTouch]));
+  const open = await db2.select({ leadId: leadTasks.leadId, dueAt: leadTasks.dueAt }).from(leadTasks).where(eq2(leadTasks.done, false));
+  const now = Date.now();
+  const byLead = /* @__PURE__ */ new Map();
+  for (const t of open) {
+    const e = byLead.get(t.leadId) ?? { open: 0, overdue: 0 };
+    e.open += 1;
+    if (t.dueAt && new Date(t.dueAt).getTime() < now) e.overdue += 1;
+    byLead.set(t.leadId, e);
+  }
+  return rows.map((r) => ({
+    ...r,
+    openTasks: byLead.get(r.id)?.open ?? 0,
+    overdueTasks: byLead.get(r.id)?.overdue ?? 0,
+    stageSince: stageSinceByLead.get(r.id) ?? null,
+    lastTouchAt: lastTouchByLead.get(r.id) ?? null,
+    notesText: notesByLead.get(r.id) ?? ""
+  }));
+}
+async function getLead(db2, id) {
+  const [row] = await db2.select({
+    id: leads.id,
+    name: leads.name,
+    status: leads.status,
+    lostReason: leads.lostReason,
+    dealValue: leads.dealValue,
+    commissionValue: leads.commissionValue,
+    rwNumber: leads.rwNumber,
+    source: leads.source,
+    kind: leads.kind,
+    tags: leads.tags,
+    createdAt: leads.createdAt,
+    updatedAt: leads.updatedAt,
+    contactId: leads.contactId,
+    contactName: contacts.firstName,
+    email: contacts.email,
+    phone: contacts.phone,
+    pipeline: pipelines.name,
+    pipelineKey: pipelines.key,
+    stage: stages.name,
+    stageKey: stages.key
+  }).from(leads).leftJoin(contacts, eq2(leads.contactId, contacts.id)).leftJoin(pipelines, eq2(leads.pipelineId, pipelines.id)).leftJoin(stages, eq2(leads.stageId, stages.id)).where(eq2(leads.id, id));
+  if (!row) return null;
+  const [notes, tasks, events, pipe] = await Promise.all([
+    db2.select().from(leadNotes).where(eq2(leadNotes.leadId, id)).orderBy(desc(leadNotes.createdAt)),
+    db2.select().from(leadTasks).where(eq2(leadTasks.leadId, id)).orderBy(asc(leadTasks.done), asc(leadTasks.createdAt)),
+    db2.select().from(leadEvents).where(eq2(leadEvents.leadId, id)).orderBy(desc(leadEvents.createdAt)),
+    row.pipelineKey ? listPipelines(db2) : Promise.resolve([])
+  ]);
+  const stagesForPipe = pipe.find((p) => p.key === row.pipelineKey)?.stages ?? [];
+  return { ...row, notes, tasks, events, stages: stagesForPipe };
+}
+var TOUCH_LABELS = {
+  call: "\u{1F4DE} \u0417\u0432\u043E\u043D\u043E\u043A",
+  message: "\u{1F4AC} \u0421\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435",
+  meet: "\u{1F91D} \u0412\u0441\u0442\u0440\u0435\u0447\u0430"
+};
+async function addTouch(db2, leadId, kind) {
+  const label = TOUCH_LABELS[kind];
+  if (!label) return null;
+  const [lead] = await db2.select({ id: leads.id }).from(leads).where(eq2(leads.id, leadId));
+  if (!lead) return null;
+  await db2.insert(leadEvents).values({ leadId, type: "touch", toStage: label });
+  await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq2(leads.id, leadId));
+  return { id: leadId, label };
+}
+async function addShortlistView(db2, leadId) {
+  const [lead] = await db2.select({ id: leads.id }).from(leads).where(eq2(leads.id, leadId));
+  if (!lead) return null;
+  const sixHoursAgo = new Date(Date.now() - 6 * 36e5);
+  const [recent] = await db2.select({ id: leadEvents.id }).from(leadEvents).where(
+    and(
+      eq2(leadEvents.leadId, leadId),
+      eq2(leadEvents.type, "shortlist_view"),
+      gte(leadEvents.createdAt, sixHoursAgo)
+    )
+  ).limit(1);
+  if (recent) return { id: leadId, recorded: false };
+  await db2.insert(leadEvents).values({ leadId, type: "shortlist_view", toStage: "\u{1F440} \u041E\u0442\u043A\u0440\u044B\u043B \u043F\u043E\u0434\u0431\u043E\u0440\u043A\u0443" });
+  await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq2(leads.id, leadId));
+  return { id: leadId, recorded: true };
+}
+async function addNote(db2, leadId, text2) {
+  if (!text2.trim()) return null;
+  const [n] = await db2.insert(leadNotes).values({ leadId, text: text2.trim() }).returning({ id: leadNotes.id });
+  await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq2(leads.id, leadId));
+  return n;
+}
+async function addTask(db2, leadId, title, dueAt) {
+  if (!title.trim()) return null;
+  const [t] = await db2.insert(leadTasks).values({ leadId, title: title.trim(), dueAt: dueAt ? new Date(dueAt) : null }).returning({ id: leadTasks.id });
+  return t;
+}
+async function updateTask(db2, taskId, patch) {
+  const set = {};
+  if (typeof patch.done === "boolean") set.done = patch.done;
+  if ("dueAt" in patch) set.dueAt = patch.dueAt ? new Date(patch.dueAt) : null;
+  if (Object.keys(set).length === 0) return null;
+  const [t] = await db2.update(leadTasks).set(set).where(eq2(leadTasks.id, taskId)).returning({ id: leadTasks.id });
+  return t ?? null;
+}
+async function listContacts(db2, limit = 1e3) {
+  return db2.select({
+    id: contacts.id,
+    name: contacts.firstName,
+    email: contacts.email,
+    phone: contacts.phone,
+    createdAt: contacts.createdAt,
+    leadsCount: sql`count(${leads.id})::int`,
+    openLeads: sql`(count(${leads.id}) filter (where ${leads.status} = 'open'))::int`,
+    lastLeadId: sql`max(${leads.id})`
+  }).from(contacts).leftJoin(leads, eq2(leads.contactId, contacts.id)).groupBy(contacts.id).orderBy(asc(contacts.firstName), asc(contacts.id)).limit(limit);
+}
+async function mergeContacts(db2, keepId, mergeId) {
+  if (keepId === mergeId) return null;
+  const [keep] = await db2.select().from(contacts).where(eq2(contacts.id, keepId));
+  const [dupe] = await db2.select().from(contacts).where(eq2(contacts.id, mergeId));
+  if (!keep || !dupe) return null;
+  return db2.transaction(async (tx) => {
+    const moved = await tx.update(leads).set({ contactId: keepId }).where(eq2(leads.contactId, mergeId)).returning({ id: leads.id });
+    const fill = {};
+    if (!keep.email && dupe.email) fill.email = dupe.email;
+    if (!keep.phone && dupe.phone) fill.phone = dupe.phone;
+    if (Object.keys(fill).length) await tx.update(contacts).set(fill).where(eq2(contacts.id, keepId));
+    await tx.delete(contacts).where(eq2(contacts.id, mergeId));
+    return { keepId, mergedLeads: moved.length };
+  });
+}
+async function listTasks(db2, opts = {}) {
+  const { done = false, limit = 300 } = opts;
+  return db2.select({
+    id: leadTasks.id,
+    leadId: leadTasks.leadId,
+    title: leadTasks.title,
+    dueAt: leadTasks.dueAt,
+    done: leadTasks.done,
+    createdAt: leadTasks.createdAt,
+    leadName: leads.name,
+    leadStatus: leads.status,
+    contactName: contacts.firstName,
+    phone: contacts.phone
+  }).from(leadTasks).innerJoin(leads, eq2(leadTasks.leadId, leads.id)).leftJoin(contacts, eq2(leads.contactId, contacts.id)).where(eq2(leadTasks.done, done)).orderBy(asc(leadTasks.dueAt), asc(leadTasks.id)).limit(limit);
+}
+async function updateLeadContact(db2, id, patch) {
+  const [lead] = await db2.select().from(leads).where(eq2(leads.id, id));
+  if (!lead) return null;
+  const norm = (v) => v == null ? void 0 : v.trim() || null;
+  if (lead.contactId != null) {
+    const cset = {};
+    if (patch.contactName !== void 0) cset.firstName = norm(patch.contactName);
+    if (patch.email !== void 0) cset.email = norm(patch.email);
+    if (patch.phone !== void 0) cset.phone = norm(patch.phone);
+    if (Object.keys(cset).length)
+      await db2.update(contacts).set(cset).where(eq2(contacts.id, lead.contactId));
+  }
+  const lset = { updatedAt: /* @__PURE__ */ new Date() };
+  if (patch.rwNumber !== void 0) lset.rwNumber = norm(patch.rwNumber);
+  if (patch.name !== void 0 && patch.name.trim()) lset.name = patch.name.trim();
+  const [row] = await db2.update(leads).set(lset).where(eq2(leads.id, id)).returning({ id: leads.id });
+  return row ?? null;
+}
+async function deleteLead(db2, id) {
+  const [lead] = await db2.select().from(leads).where(eq2(leads.id, id));
+  if (!lead) return null;
+  await db2.delete(leads).where(eq2(leads.id, id));
+  if (lead.contactId != null) {
+    const others = await db2.select({ id: leads.id }).from(leads).where(eq2(leads.contactId, lead.contactId));
+    if (others.length === 0) await db2.delete(contacts).where(eq2(contacts.id, lead.contactId));
+  }
+  return { id };
+}
+async function listEvents(db2, limit = 200) {
+  return db2.select({
+    id: leadEvents.id,
+    leadId: leadEvents.leadId,
+    type: leadEvents.type,
+    fromStage: leadEvents.fromStage,
+    toStage: leadEvents.toStage,
+    createdAt: leadEvents.createdAt,
+    leadName: leads.name,
+    contactName: contacts.firstName
+  }).from(leadEvents).leftJoin(leads, eq2(leadEvents.leadId, leads.id)).leftJoin(contacts, eq2(leads.contactId, contacts.id)).orderBy(desc(leadEvents.createdAt)).limit(limit);
+}
+async function listPipelines(db2) {
+  const pipes = await db2.select().from(pipelines).orderBy(asc(pipelines.sort));
+  const allStages = await db2.select().from(stages).orderBy(asc(stages.sort));
+  return pipes.map((p) => ({
+    id: p.id,
+    key: p.key,
+    name: p.name,
+    stages: allStages.filter((s) => s.pipelineId === p.id).map((s) => ({ id: s.id, key: s.key, name: s.name, sort: s.sort, isWon: s.isWon, isLost: s.isLost }))
+  }));
+}
+async function updateLead(db2, id, patch) {
+  const [lead] = await db2.select().from(leads).where(eq2(leads.id, id));
+  if (!lead) return null;
+  const set = { updatedAt: /* @__PURE__ */ new Date() };
+  if (patch.status) set.status = patch.status;
+  if (typeof patch.lostReason === "string") set.lostReason = patch.lostReason.trim() || null;
+  if (patch.dealValue !== void 0) {
+    const v = patch.dealValue === null ? null : Number(patch.dealValue);
+    set.dealValue = v != null && Number.isFinite(v) && v > 0 ? v : null;
+  }
+  if (patch.commissionValue !== void 0) {
+    const v = patch.commissionValue === null ? null : Number(patch.commissionValue);
+    set.commissionValue = v != null && Number.isFinite(v) && v > 0 ? v : null;
+  }
+  if (Array.isArray(patch.tags)) {
+    set.tags = patch.tags.map((t) => String(t).trim()).filter(Boolean);
+  }
+  let stageEvent = null;
+  if (patch.stageKey && lead.pipelineId != null) {
+    const [st] = await db2.select().from(stages).where(and(eq2(stages.pipelineId, lead.pipelineId), eq2(stages.key, patch.stageKey)));
+    if (st) {
+      set.stageId = st.id;
+      set.status = st.isWon ? "won" : st.isLost ? "lost" : "open";
+      if (!st.isLost && typeof patch.lostReason !== "string") set.lostReason = null;
+      if (st.id !== lead.stageId) {
+        const [old] = lead.stageId ? await db2.select().from(stages).where(eq2(stages.id, lead.stageId)) : [];
+        stageEvent = { fromStage: old?.name ?? null, toStage: st.name };
+      }
+    }
+  }
+  const [row] = await db2.update(leads).set(set).where(eq2(leads.id, id)).returning({ id: leads.id });
+  if (row && stageEvent) {
+    await db2.insert(leadEvents).values({ leadId: id, type: "stage", ...stageEvent });
+    const reason = typeof patch.lostReason === "string" ? patch.lostReason : "";
+    if (set.status === "lost" && /передумал|не отвечает/i.test(reason)) {
+      const due = /* @__PURE__ */ new Date();
+      due.setUTCDate(due.getUTCDate() + 30);
+      due.setUTCHours(0, 0, 0, 0);
+      await db2.insert(leadTasks).values({
+        leadId: id,
+        title: "\u{1F501} \u0420\u0435\u0430\u043D\u0438\u043C\u0430\u0446\u0438\u044F: \u0441\u043F\u0440\u043E\u0441\u0438\u0442\u044C \u0435\u0449\u0451 \u0440\u0430\u0437 (\u0430\u0432\u0442\u043E, 30 \u0434\u043D \u043F\u043E\u0441\u043B\u0435 \u043F\u043E\u0442\u0435\u0440\u0438)",
+        dueAt: due
+      });
+    }
+  }
+  return row ?? null;
+}
+
+// src/lib/matching.ts
+var VILLA_TYPES = /* @__PURE__ */ new Set(["Villa", "House", "Apartment", "Project"]);
+var isUnit = (rw) => /^RW-P\d+-\d+$/i.test(rw);
+function leadWantTypes(lead) {
+  const interest = (lead.tags ?? []).find((t) => t.startsWith("interest:"))?.slice(9);
+  if (interest) return /* @__PURE__ */ new Set([interest]);
+  if (lead.pipelineKey === "villa_house") return new Set(VILLA_TYPES);
+  if (lead.pipelineKey === "land") return /* @__PURE__ */ new Set(["Land"]);
+  return null;
+}
+function scoreLead(object, lead) {
+  if ((lead.status ?? "open") !== "open") return 0;
+  if (lead.pipelineKey === "legacy") return 0;
+  const tags = lead.tags ?? [];
+  let score = 0;
+  const shortlisted = tags.includes(`object:${object.rwNumber}`);
+  const inquired = lead.rwNumber === object.rwNumber;
+  if (shortlisted) score += 6;
+  if (inquired) score += 5;
+  const wantTypes = leadWantTypes(lead);
+  const typeOk = !wantTypes || wantTypes.has(object.type);
+  if (wantTypes && wantTypes.has(object.type)) score += 2;
+  const district = (object.district ?? "").toLowerCase();
+  const leadText = `${lead.name ?? ""} ${lead.notesText ?? ""}`.toLowerCase();
+  if (district && leadText.includes(district)) score += 3;
+  if (tags.includes("hot")) score += 1;
+  if ((lead.dealValue ?? 0) > 0) score += 1;
+  return score > 0 && (typeOk || shortlisted || inquired) ? score : 0;
+}
+async function recentObjectMatches(db2, hours = 24) {
+  const since = new Date(Date.now() - hours * 36e5);
+  const recent = await db2.select({
+    rwNumber: objects.rwNumber,
+    title: objects.titleEn,
+    type: objects.type,
+    district: objects.district
+  }).from(objects).where(and2(eq3(objects.status, "Active"), gte2(objects.createdAt, since)));
+  if (recent.length === 0) return [];
+  const leads2 = await listLeads(db2, 1e3);
+  const out = [];
+  for (const o of recent) {
+    if (isUnit(o.rwNumber)) continue;
+    const scored = leads2.map((l) => ({ l, s: scoreLead(o, l) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s);
+    if (scored.length === 0) continue;
+    out.push({
+      rwNumber: o.rwNumber,
+      title: o.title,
+      type: o.type,
+      district: o.district,
+      matchCount: scored.length,
+      topLeads: scored.slice(0, 5).map(({ l }) => ({
+        id: l.id,
+        name: l.contactName || l.name,
+        phone: l.phone ?? null
+      }))
+    });
+  }
+  return out.sort((a, b) => b.matchCount - a.matchCount);
+}
+
 // src/lib/write.ts
-import { eq as eq2, sql } from "drizzle-orm";
+import { eq as eq4, sql as sql2 } from "drizzle-orm";
 
 // src/lib/object-title.ts
 function seed(s) {
@@ -1110,10 +1556,10 @@ async function createObject(db2, input) {
 }
 async function addObjectPhotos(db2, rwNumber, urls) {
   const clean = urls.map((u2) => String(u2).trim()).filter((u2) => /^https?:\/\//i.test(u2));
-  const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq2(objects.rwNumber, rwNumber));
+  const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq4(objects.rwNumber, rwNumber));
   if (!obj) return null;
   if (clean.length === 0) return { rwNumber, added: 0, coverSet: false };
-  const existing = await db2.select({ sort: objectPhotos.sort }).from(objectPhotos).where(eq2(objectPhotos.objectId, obj.id));
+  const existing = await db2.select({ sort: objectPhotos.sort }).from(objectPhotos).where(eq4(objectPhotos.objectId, obj.id));
   const hadPhotos = existing.length > 0;
   const startSort = existing.reduce((m, r) => Math.max(m, r.sort + 1), 0);
   await db2.insert(objectPhotos).values(
@@ -1124,7 +1570,7 @@ async function addObjectPhotos(db2, rwNumber, urls) {
       isCover: !hadPhotos && i === 0
     }))
   );
-  await db2.update(objects).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq2(objects.id, obj.id));
+  await db2.update(objects).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq4(objects.id, obj.id));
   return { rwNumber, added: clean.length, coverSet: !hadPhotos };
 }
 var PATCHABLE = /* @__PURE__ */ new Set([
@@ -1179,398 +1625,15 @@ async function updateObject(db2, rwNumber, patch) {
     }
     set[k] = v;
   }
-  const [row] = await db2.update(objects).set(set).where(eq2(objects.rwNumber, rwNumber)).returning({ rwNumber: objects.rwNumber });
-  return row ?? null;
-}
-
-// src/lib/crm.ts
-import { eq as eq3, and, asc, desc, gte, sql as sql2 } from "drizzle-orm";
-var PIPELINES = [
-  { key: "land", name: "Land", sort: 0 },
-  { key: "villa_house", name: "Villas & Houses", sort: 1 },
-  // Imported Circle-era leads land here for manual triage; revived ones are
-  // re-created in a working pipeline, dead ones closed in place.
-  { key: "legacy", name: "\u0420\u0430\u0437\u0431\u043E\u0440 (legacy)", sort: 9 }
-];
-var DEAL_STAGES = [
-  { key: "incoming", name: "Incoming", sort: 0, isWon: false, isLost: false },
-  { key: "contacted", name: "Contacted", sort: 1, isWon: false, isLost: false },
-  { key: "qualified", name: "Qualified", sort: 2, isWon: false, isLost: false },
-  { key: "viewing", name: "Viewing", sort: 3, isWon: false, isLost: false },
-  { key: "negotiation", name: "Offer / Negotiation", sort: 4, isWon: false, isLost: false },
-  { key: "reservation", name: "Reservation", sort: 5, isWon: false, isLost: false },
-  { key: "dd", name: "Due Diligence", sort: 6, isWon: false, isLost: false },
-  { key: "spa", name: "Contract (SPA)", sort: 7, isWon: false, isLost: false },
-  { key: "transfer", name: "Transfer", sort: 8, isWon: false, isLost: false },
-  { key: "won", name: "Won", sort: 9, isWon: true, isLost: false },
-  { key: "lost", name: "Lost", sort: 10, isWon: false, isLost: true }
-];
-var LEGACY_STAGES = [
-  { key: "incoming", name: "\u0420\u0430\u0437\u043E\u0431\u0440\u0430\u0442\u044C", sort: 0, isWon: false, isLost: false },
-  { key: "contacted", name: "\u0421\u0432\u044F\u0437\u0430\u043B\u0438\u0441\u044C", sort: 1, isWon: false, isLost: false },
-  { key: "revived", name: "\u0420\u0435\u0430\u043D\u0438\u043C\u0438\u0440\u043E\u0432\u0430\u043D \u2192 \u0432 \u0440\u0430\u0431\u043E\u0442\u0443", sort: 2, isWon: false, isLost: false },
-  { key: "dead", name: "\u041C\u0451\u0440\u0442\u0432", sort: 3, isWon: false, isLost: true }
-];
-function stagesFor(pipelineKey) {
-  return pipelineKey === "legacy" ? LEGACY_STAGES : DEAL_STAGES;
-}
-async function seedCrm(db2) {
-  for (const p of PIPELINES) {
-    await db2.insert(pipelines).values(p).onConflictDoNothing({ target: pipelines.key });
-  }
-  const pipes = await db2.select().from(pipelines);
-  for (const p of pipes) {
-    const canon = stagesFor(p.key);
-    const existing = await db2.select().from(stages).where(eq3(stages.pipelineId, p.id));
-    const byKey = new Map(existing.map((s) => [s.key, s]));
-    for (const s of canon) {
-      const cur = byKey.get(s.key);
-      if (!cur) {
-        await db2.insert(stages).values({ ...s, pipelineId: p.id });
-      } else if (cur.name !== s.name || cur.sort !== s.sort || cur.isWon !== s.isWon || cur.isLost !== s.isLost) {
-        await db2.update(stages).set({ name: s.name, sort: s.sort, isWon: s.isWon, isLost: s.isLost }).where(eq3(stages.id, cur.id));
-      }
-    }
-  }
-}
-async function createLead(db2, input) {
-  const [pipe] = await db2.select().from(pipelines).where(eq3(pipelines.key, input.pipeline)) ?? [];
-  const pipeline = pipe ?? (await db2.select().from(pipelines).where(eq3(pipelines.key, "land")))[0];
-  if (!pipeline) throw new Error("CRM not seeded: no pipelines. Run seedCrm().");
-  const [stage] = await db2.select().from(stages).where(eq3(stages.pipelineId, pipeline.id)).orderBy(asc(stages.sort)).limit(1);
-  return db2.transaction(async (tx) => {
-    let contactId = input.contactId ?? null;
-    if (contactId != null) {
-      const [existing] = await tx.select({ id: contacts.id }).from(contacts).where(eq3(contacts.id, contactId));
-      if (!existing) contactId = null;
-    }
-    if (contactId == null) {
-      const [created] = await tx.insert(contacts).values({
-        firstName: input.contact.name,
-        email: input.contact.email,
-        phone: input.contact.phone
-      }).returning({ id: contacts.id });
-      contactId = created.id;
-    }
-    const contact = { id: contactId };
-    const [lead] = await tx.insert(leads).values({
-      name: input.leadName,
-      pipelineId: pipeline.id,
-      stageId: stage?.id,
-      contactId: contact.id,
-      status: "open",
-      rwNumber: input.rwNumber,
-      source: input.source,
-      kind: input.kind,
-      tags: input.tags?.length ? input.tags : void 0,
-      updatedAt: /* @__PURE__ */ new Date()
-    }).returning({ id: leads.id });
-    if (input.note?.trim()) {
-      await tx.insert(leadNotes).values({ leadId: lead.id, text: input.note.trim() });
-    }
-    await tx.insert(leadEvents).values({
-      leadId: lead.id,
-      type: "created",
-      toStage: stage?.name ?? null
-    });
-    if (input.autoTask !== false) {
-      const due = /* @__PURE__ */ new Date();
-      due.setUTCDate(due.getUTCDate() + 1);
-      due.setUTCHours(3, 0, 0, 0);
-      await tx.insert(leadTasks).values({
-        leadId: lead.id,
-        title: "\u{1F4DE} \u0421\u0432\u044F\u0437\u0430\u0442\u044C\u0441\u044F \u0441 \u043B\u0438\u0434\u043E\u043C (\u0430\u0432\u0442\u043E)",
-        dueAt: due
-      });
-    }
-    return {
-      leadId: lead.id,
-      contactId: contact.id,
-      pipeline: pipeline.name,
-      stage: stage?.name ?? "\u2014"
-    };
-  });
-}
-async function listLeads(db2, limit = 500) {
-  const rows = await db2.select({
-    id: leads.id,
-    name: leads.name,
-    status: leads.status,
-    lostReason: leads.lostReason,
-    dealValue: leads.dealValue,
-    commissionValue: leads.commissionValue,
-    rwNumber: leads.rwNumber,
-    source: leads.source,
-    kind: leads.kind,
-    tags: leads.tags,
-    createdAt: leads.createdAt,
-    updatedAt: leads.updatedAt,
-    contactName: contacts.firstName,
-    email: contacts.email,
-    phone: contacts.phone,
-    pipeline: pipelines.name,
-    pipelineKey: pipelines.key,
-    stage: stages.name,
-    stageKey: stages.key,
-    stageId: stages.id
-  }).from(leads).leftJoin(contacts, eq3(leads.contactId, contacts.id)).leftJoin(pipelines, eq3(leads.pipelineId, pipelines.id)).leftJoin(stages, eq3(leads.stageId, stages.id)).orderBy(desc(leads.createdAt)).limit(limit);
-  const notesAgg = await db2.select({
-    leadId: leadNotes.leadId,
-    text: sql2`string_agg(${leadNotes.text}, ' ')`
-  }).from(leadNotes).groupBy(leadNotes.leadId);
-  const notesByLead = new Map(notesAgg.map((n) => [n.leadId, (n.text || "").slice(0, 1500)]));
-  const lastEvent = await db2.select({
-    leadId: leadEvents.leadId,
-    last: sql2`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} in ('created','stage'))`,
-    lastTouch: sql2`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} = 'touch')`
-  }).from(leadEvents).groupBy(leadEvents.leadId);
-  const stageSinceByLead = new Map(lastEvent.map((e) => [e.leadId, e.last]));
-  const lastTouchByLead = new Map(lastEvent.map((e) => [e.leadId, e.lastTouch]));
-  const open = await db2.select({ leadId: leadTasks.leadId, dueAt: leadTasks.dueAt }).from(leadTasks).where(eq3(leadTasks.done, false));
-  const now = Date.now();
-  const byLead = /* @__PURE__ */ new Map();
-  for (const t of open) {
-    const e = byLead.get(t.leadId) ?? { open: 0, overdue: 0 };
-    e.open += 1;
-    if (t.dueAt && new Date(t.dueAt).getTime() < now) e.overdue += 1;
-    byLead.set(t.leadId, e);
-  }
-  return rows.map((r) => ({
-    ...r,
-    openTasks: byLead.get(r.id)?.open ?? 0,
-    overdueTasks: byLead.get(r.id)?.overdue ?? 0,
-    stageSince: stageSinceByLead.get(r.id) ?? null,
-    lastTouchAt: lastTouchByLead.get(r.id) ?? null,
-    notesText: notesByLead.get(r.id) ?? ""
-  }));
-}
-async function getLead(db2, id) {
-  const [row] = await db2.select({
-    id: leads.id,
-    name: leads.name,
-    status: leads.status,
-    lostReason: leads.lostReason,
-    dealValue: leads.dealValue,
-    commissionValue: leads.commissionValue,
-    rwNumber: leads.rwNumber,
-    source: leads.source,
-    kind: leads.kind,
-    tags: leads.tags,
-    createdAt: leads.createdAt,
-    updatedAt: leads.updatedAt,
-    contactId: leads.contactId,
-    contactName: contacts.firstName,
-    email: contacts.email,
-    phone: contacts.phone,
-    pipeline: pipelines.name,
-    pipelineKey: pipelines.key,
-    stage: stages.name,
-    stageKey: stages.key
-  }).from(leads).leftJoin(contacts, eq3(leads.contactId, contacts.id)).leftJoin(pipelines, eq3(leads.pipelineId, pipelines.id)).leftJoin(stages, eq3(leads.stageId, stages.id)).where(eq3(leads.id, id));
-  if (!row) return null;
-  const [notes, tasks, events, pipe] = await Promise.all([
-    db2.select().from(leadNotes).where(eq3(leadNotes.leadId, id)).orderBy(desc(leadNotes.createdAt)),
-    db2.select().from(leadTasks).where(eq3(leadTasks.leadId, id)).orderBy(asc(leadTasks.done), asc(leadTasks.createdAt)),
-    db2.select().from(leadEvents).where(eq3(leadEvents.leadId, id)).orderBy(desc(leadEvents.createdAt)),
-    row.pipelineKey ? listPipelines(db2) : Promise.resolve([])
-  ]);
-  const stagesForPipe = pipe.find((p) => p.key === row.pipelineKey)?.stages ?? [];
-  return { ...row, notes, tasks, events, stages: stagesForPipe };
-}
-var TOUCH_LABELS = {
-  call: "\u{1F4DE} \u0417\u0432\u043E\u043D\u043E\u043A",
-  message: "\u{1F4AC} \u0421\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435",
-  meet: "\u{1F91D} \u0412\u0441\u0442\u0440\u0435\u0447\u0430"
-};
-async function addTouch(db2, leadId, kind) {
-  const label = TOUCH_LABELS[kind];
-  if (!label) return null;
-  const [lead] = await db2.select({ id: leads.id }).from(leads).where(eq3(leads.id, leadId));
-  if (!lead) return null;
-  await db2.insert(leadEvents).values({ leadId, type: "touch", toStage: label });
-  await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq3(leads.id, leadId));
-  return { id: leadId, label };
-}
-async function addShortlistView(db2, leadId) {
-  const [lead] = await db2.select({ id: leads.id }).from(leads).where(eq3(leads.id, leadId));
-  if (!lead) return null;
-  const sixHoursAgo = new Date(Date.now() - 6 * 36e5);
-  const [recent] = await db2.select({ id: leadEvents.id }).from(leadEvents).where(
-    and(
-      eq3(leadEvents.leadId, leadId),
-      eq3(leadEvents.type, "shortlist_view"),
-      gte(leadEvents.createdAt, sixHoursAgo)
-    )
-  ).limit(1);
-  if (recent) return { id: leadId, recorded: false };
-  await db2.insert(leadEvents).values({ leadId, type: "shortlist_view", toStage: "\u{1F440} \u041E\u0442\u043A\u0440\u044B\u043B \u043F\u043E\u0434\u0431\u043E\u0440\u043A\u0443" });
-  await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq3(leads.id, leadId));
-  return { id: leadId, recorded: true };
-}
-async function addNote(db2, leadId, text2) {
-  if (!text2.trim()) return null;
-  const [n] = await db2.insert(leadNotes).values({ leadId, text: text2.trim() }).returning({ id: leadNotes.id });
-  await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq3(leads.id, leadId));
-  return n;
-}
-async function addTask(db2, leadId, title, dueAt) {
-  if (!title.trim()) return null;
-  const [t] = await db2.insert(leadTasks).values({ leadId, title: title.trim(), dueAt: dueAt ? new Date(dueAt) : null }).returning({ id: leadTasks.id });
-  return t;
-}
-async function updateTask(db2, taskId, patch) {
-  const set = {};
-  if (typeof patch.done === "boolean") set.done = patch.done;
-  if ("dueAt" in patch) set.dueAt = patch.dueAt ? new Date(patch.dueAt) : null;
-  if (Object.keys(set).length === 0) return null;
-  const [t] = await db2.update(leadTasks).set(set).where(eq3(leadTasks.id, taskId)).returning({ id: leadTasks.id });
-  return t ?? null;
-}
-async function listContacts(db2, limit = 1e3) {
-  return db2.select({
-    id: contacts.id,
-    name: contacts.firstName,
-    email: contacts.email,
-    phone: contacts.phone,
-    createdAt: contacts.createdAt,
-    leadsCount: sql2`count(${leads.id})::int`,
-    openLeads: sql2`(count(${leads.id}) filter (where ${leads.status} = 'open'))::int`,
-    lastLeadId: sql2`max(${leads.id})`
-  }).from(contacts).leftJoin(leads, eq3(leads.contactId, contacts.id)).groupBy(contacts.id).orderBy(asc(contacts.firstName), asc(contacts.id)).limit(limit);
-}
-async function mergeContacts(db2, keepId, mergeId) {
-  if (keepId === mergeId) return null;
-  const [keep] = await db2.select().from(contacts).where(eq3(contacts.id, keepId));
-  const [dupe] = await db2.select().from(contacts).where(eq3(contacts.id, mergeId));
-  if (!keep || !dupe) return null;
-  return db2.transaction(async (tx) => {
-    const moved = await tx.update(leads).set({ contactId: keepId }).where(eq3(leads.contactId, mergeId)).returning({ id: leads.id });
-    const fill = {};
-    if (!keep.email && dupe.email) fill.email = dupe.email;
-    if (!keep.phone && dupe.phone) fill.phone = dupe.phone;
-    if (Object.keys(fill).length) await tx.update(contacts).set(fill).where(eq3(contacts.id, keepId));
-    await tx.delete(contacts).where(eq3(contacts.id, mergeId));
-    return { keepId, mergedLeads: moved.length };
-  });
-}
-async function listTasks(db2, opts = {}) {
-  const { done = false, limit = 300 } = opts;
-  return db2.select({
-    id: leadTasks.id,
-    leadId: leadTasks.leadId,
-    title: leadTasks.title,
-    dueAt: leadTasks.dueAt,
-    done: leadTasks.done,
-    createdAt: leadTasks.createdAt,
-    leadName: leads.name,
-    leadStatus: leads.status,
-    contactName: contacts.firstName,
-    phone: contacts.phone
-  }).from(leadTasks).innerJoin(leads, eq3(leadTasks.leadId, leads.id)).leftJoin(contacts, eq3(leads.contactId, contacts.id)).where(eq3(leadTasks.done, done)).orderBy(asc(leadTasks.dueAt), asc(leadTasks.id)).limit(limit);
-}
-async function updateLeadContact(db2, id, patch) {
-  const [lead] = await db2.select().from(leads).where(eq3(leads.id, id));
-  if (!lead) return null;
-  const norm = (v) => v == null ? void 0 : v.trim() || null;
-  if (lead.contactId != null) {
-    const cset = {};
-    if (patch.contactName !== void 0) cset.firstName = norm(patch.contactName);
-    if (patch.email !== void 0) cset.email = norm(patch.email);
-    if (patch.phone !== void 0) cset.phone = norm(patch.phone);
-    if (Object.keys(cset).length)
-      await db2.update(contacts).set(cset).where(eq3(contacts.id, lead.contactId));
-  }
-  const lset = { updatedAt: /* @__PURE__ */ new Date() };
-  if (patch.rwNumber !== void 0) lset.rwNumber = norm(patch.rwNumber);
-  if (patch.name !== void 0 && patch.name.trim()) lset.name = patch.name.trim();
-  const [row] = await db2.update(leads).set(lset).where(eq3(leads.id, id)).returning({ id: leads.id });
-  return row ?? null;
-}
-async function deleteLead(db2, id) {
-  const [lead] = await db2.select().from(leads).where(eq3(leads.id, id));
-  if (!lead) return null;
-  await db2.delete(leads).where(eq3(leads.id, id));
-  if (lead.contactId != null) {
-    const others = await db2.select({ id: leads.id }).from(leads).where(eq3(leads.contactId, lead.contactId));
-    if (others.length === 0) await db2.delete(contacts).where(eq3(contacts.id, lead.contactId));
-  }
-  return { id };
-}
-async function listEvents(db2, limit = 200) {
-  return db2.select({
-    id: leadEvents.id,
-    leadId: leadEvents.leadId,
-    type: leadEvents.type,
-    fromStage: leadEvents.fromStage,
-    toStage: leadEvents.toStage,
-    createdAt: leadEvents.createdAt,
-    leadName: leads.name,
-    contactName: contacts.firstName
-  }).from(leadEvents).leftJoin(leads, eq3(leadEvents.leadId, leads.id)).leftJoin(contacts, eq3(leads.contactId, contacts.id)).orderBy(desc(leadEvents.createdAt)).limit(limit);
-}
-async function listPipelines(db2) {
-  const pipes = await db2.select().from(pipelines).orderBy(asc(pipelines.sort));
-  const allStages = await db2.select().from(stages).orderBy(asc(stages.sort));
-  return pipes.map((p) => ({
-    id: p.id,
-    key: p.key,
-    name: p.name,
-    stages: allStages.filter((s) => s.pipelineId === p.id).map((s) => ({ id: s.id, key: s.key, name: s.name, sort: s.sort, isWon: s.isWon, isLost: s.isLost }))
-  }));
-}
-async function updateLead(db2, id, patch) {
-  const [lead] = await db2.select().from(leads).where(eq3(leads.id, id));
-  if (!lead) return null;
-  const set = { updatedAt: /* @__PURE__ */ new Date() };
-  if (patch.status) set.status = patch.status;
-  if (typeof patch.lostReason === "string") set.lostReason = patch.lostReason.trim() || null;
-  if (patch.dealValue !== void 0) {
-    const v = patch.dealValue === null ? null : Number(patch.dealValue);
-    set.dealValue = v != null && Number.isFinite(v) && v > 0 ? v : null;
-  }
-  if (patch.commissionValue !== void 0) {
-    const v = patch.commissionValue === null ? null : Number(patch.commissionValue);
-    set.commissionValue = v != null && Number.isFinite(v) && v > 0 ? v : null;
-  }
-  if (Array.isArray(patch.tags)) {
-    set.tags = patch.tags.map((t) => String(t).trim()).filter(Boolean);
-  }
-  let stageEvent = null;
-  if (patch.stageKey && lead.pipelineId != null) {
-    const [st] = await db2.select().from(stages).where(and(eq3(stages.pipelineId, lead.pipelineId), eq3(stages.key, patch.stageKey)));
-    if (st) {
-      set.stageId = st.id;
-      set.status = st.isWon ? "won" : st.isLost ? "lost" : "open";
-      if (!st.isLost && typeof patch.lostReason !== "string") set.lostReason = null;
-      if (st.id !== lead.stageId) {
-        const [old] = lead.stageId ? await db2.select().from(stages).where(eq3(stages.id, lead.stageId)) : [];
-        stageEvent = { fromStage: old?.name ?? null, toStage: st.name };
-      }
-    }
-  }
-  const [row] = await db2.update(leads).set(set).where(eq3(leads.id, id)).returning({ id: leads.id });
-  if (row && stageEvent) {
-    await db2.insert(leadEvents).values({ leadId: id, type: "stage", ...stageEvent });
-    const reason = typeof patch.lostReason === "string" ? patch.lostReason : "";
-    if (set.status === "lost" && /передумал|не отвечает/i.test(reason)) {
-      const due = /* @__PURE__ */ new Date();
-      due.setUTCDate(due.getUTCDate() + 30);
-      due.setUTCHours(0, 0, 0, 0);
-      await db2.insert(leadTasks).values({
-        leadId: id,
-        title: "\u{1F501} \u0420\u0435\u0430\u043D\u0438\u043C\u0430\u0446\u0438\u044F: \u0441\u043F\u0440\u043E\u0441\u0438\u0442\u044C \u0435\u0449\u0451 \u0440\u0430\u0437 (\u0430\u0432\u0442\u043E, 30 \u0434\u043D \u043F\u043E\u0441\u043B\u0435 \u043F\u043E\u0442\u0435\u0440\u0438)",
-        dueAt: due
-      });
-    }
-  }
+  const [row] = await db2.update(objects).set(set).where(eq4(objects.rwNumber, rwNumber)).returning({ rwNumber: objects.rwNumber });
   return row ?? null;
 }
 
 // src/lib/auth.ts
 import bcrypt from "bcryptjs";
-import { eq as eq4 } from "drizzle-orm";
+import { eq as eq5 } from "drizzle-orm";
 async function verifyLogin(db2, email, password) {
-  const [u2] = await db2.select().from(users).where(eq4(users.email, email.trim().toLowerCase()));
+  const [u2] = await db2.select().from(users).where(eq5(users.email, email.trim().toLowerCase()));
   if (!u2) return null;
   const ok = await bcrypt.compare(password, u2.passwordHash);
   if (!ok) return null;
@@ -1578,12 +1641,12 @@ async function verifyLogin(db2, email, password) {
 }
 
 // src/lib/views.ts
-import { eq as eq5, sql as sql3 } from "drizzle-orm";
+import { eq as eq6, sql as sql3 } from "drizzle-orm";
 function bangkokDay(offsetDays = 0) {
   return new Date(Date.now() + 7 * 36e5 + offsetDays * 864e5).toISOString().slice(0, 10);
 }
 async function trackView(db2, rwNumber) {
-  const found = await db2.select({ id: objects.id }).from(objects).where(eq5(objects.rwNumber, rwNumber)).limit(1);
+  const found = await db2.select({ id: objects.id }).from(objects).where(eq6(objects.rwNumber, rwNumber)).limit(1);
   if (found.length === 0) return false;
   await db2.insert(objectViewsDaily).values({ rwNumber, day: bangkokDay(), views: 1 }).onConflictDoUpdate({
     target: [objectViewsDaily.rwNumber, objectViewsDaily.day],
@@ -1609,7 +1672,7 @@ async function viewsSummary(db2) {
 }
 
 // src/lib/articles.ts
-import { eq as eq6, and as and2, desc as desc2, sql as sql4, inArray } from "drizzle-orm";
+import { eq as eq7, and as and3, desc as desc2, sql as sql4, inArray } from "drizzle-orm";
 var ArticleInputError = class extends Error {
 };
 var STATUSES = ["pending", "published", "rejected"];
@@ -1630,8 +1693,8 @@ async function createArticle(db2, input) {
   const lang = input.lang === "ru" ? "ru" : "en";
   let slug = input.slug?.trim() || slugify(title) || `article-${Date.now()}`;
   const existing = await db2.select({ slug: articles.slug }).from(articles).where(
-    and2(
-      eq6(articles.lang, lang),
+    and3(
+      eq7(articles.lang, lang),
       sql4`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
     )
   );
@@ -1657,24 +1720,24 @@ async function createArticle(db2, input) {
 }
 async function listArticles(db2, opts = {}) {
   const conds = [];
-  if (opts.status) conds.push(eq6(articles.status, opts.status));
-  if (opts.lang) conds.push(eq6(articles.lang, opts.lang));
-  return db2.select().from(articles).where(conds.length ? and2(...conds) : void 0).orderBy(desc2(sql4`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
+  if (opts.status) conds.push(eq7(articles.status, opts.status));
+  if (opts.lang) conds.push(eq7(articles.lang, opts.lang));
+  return db2.select().from(articles).where(conds.length ? and3(...conds) : void 0).orderBy(desc2(sql4`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
 }
 async function getArticleById(db2, id) {
-  const [row] = await db2.select().from(articles).where(eq6(articles.id, id)).limit(1);
+  const [row] = await db2.select().from(articles).where(eq7(articles.id, id)).limit(1);
   return row ?? null;
 }
 async function getArticleBySlug(db2, slug, lang) {
-  const conds = [eq6(articles.slug, slug)];
-  if (lang) conds.push(eq6(articles.lang, lang));
-  const [row] = await db2.select().from(articles).where(and2(...conds)).limit(1);
+  const conds = [eq7(articles.slug, slug)];
+  if (lang) conds.push(eq7(articles.lang, lang));
+  const [row] = await db2.select().from(articles).where(and3(...conds)).limit(1);
   return row ?? null;
 }
 async function countPending(db2, lang) {
-  const conds = [eq6(articles.status, "pending")];
-  if (lang) conds.push(eq6(articles.lang, lang));
-  const [r] = await db2.select({ n: sql4`count(*)::int` }).from(articles).where(and2(...conds));
+  const conds = [eq7(articles.status, "pending")];
+  if (lang) conds.push(eq7(articles.lang, lang));
+  const [r] = await db2.select({ n: sql4`count(*)::int` }).from(articles).where(and3(...conds));
   return r?.n ?? 0;
 }
 async function updateArticle(db2, id, patch) {
@@ -1694,16 +1757,16 @@ async function updateArticle(db2, id, patch) {
   }
   if (patch.takeaways !== void 0) set.takeaways = patch.takeaways;
   if (patch.coverImage !== void 0) set.coverImage = patch.coverImage;
-  const [row] = await db2.update(articles).set(set).where(eq6(articles.id, id)).returning();
+  const [row] = await db2.update(articles).set(set).where(eq7(articles.id, id)).returning();
   return row ?? null;
 }
 async function deleteArticle(db2, id) {
-  const res = await db2.delete(articles).where(eq6(articles.id, id)).returning({ id: articles.id });
+  const res = await db2.delete(articles).where(eq7(articles.id, id)).returning({ id: articles.id });
   return res.length > 0;
 }
 
 // src/lib/contact-bot.ts
-import { eq as eq7 } from "drizzle-orm";
+import { eq as eq8 } from "drizzle-orm";
 var SITE = "https://rightwaygroup.co";
 var FLOOD_WINDOW_MS = 6e4;
 var FLOOD_MAX = 16;
@@ -1755,7 +1818,7 @@ async function handleContactUpdate(db2, update, cfg) {
   if (!msg || !msg.from || msg.from.is_bot) return;
   if (msg.from.id === cfg.ownerId) {
     if (!msg.reply_to_message) return;
-    const rows = await db2.select().from(contactThreads).where(eq7(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
+    const rows = await db2.select().from(contactThreads).where(eq8(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
     const thread = rows[0];
     if (!thread) {
       await tg(cfg, "sendMessage", {
@@ -1797,7 +1860,7 @@ async function handleContactUpdate(db2, update, cfg) {
       return;
     }
   }
-  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq7(contactThreads.clientChatId, msg.chat.id));
+  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq8(contactThreads.clientChatId, msg.chat.id));
   const firstContact = history.length === 0;
   const cutoff = new Date(Date.now() - FLOOD_WINDOW_MS);
   const recent = history.filter((h2) => h2.createdAt > cutoff).length;
@@ -1864,7 +1927,7 @@ ${problems.join("\n")}`,
 }
 
 // src/lib/valuation.ts
-import { eq as eq8, desc as desc3 } from "drizzle-orm";
+import { eq as eq9, desc as desc3 } from "drizzle-orm";
 var ValuationInputError = class extends Error {
 };
 async function listFactorOverrides(db2) {
@@ -1875,7 +1938,7 @@ async function setFactorOverrides(db2, entries) {
     const key = String(e.key ?? "").trim();
     if (!key) throw new ValuationInputError("factor key is required");
     if (e.value === null) {
-      await db2.delete(valuationFactors).where(eq8(valuationFactors.key, key));
+      await db2.delete(valuationFactors).where(eq9(valuationFactors.key, key));
       continue;
     }
     const value = Number(e.value);
@@ -1934,11 +1997,11 @@ async function updateComp(db2, id, patch) {
   }
   if (patch.note !== void 0) set.note = patch.note?.trim() || null;
   if (Object.keys(set).length === 0) return null;
-  const [row] = await db2.update(valuationComps).set(set).where(eq8(valuationComps.id, id)).returning();
+  const [row] = await db2.update(valuationComps).set(set).where(eq9(valuationComps.id, id)).returning();
   return row ?? null;
 }
 async function deleteComp(db2, id) {
-  const rows = await db2.delete(valuationComps).where(eq8(valuationComps.id, id)).returning();
+  const rows = await db2.delete(valuationComps).where(eq9(valuationComps.id, id)).returning();
   return rows.length > 0;
 }
 async function logValuation(db2, input) {
@@ -2028,6 +2091,10 @@ app.get("/objects", async (c) => {
 app.get("/objects/all", async (c) => {
   const data = await getAllObjects(db);
   return c.json(data);
+});
+app.get("/objects/recent-matches", async (c) => {
+  const hours = Math.min(Number(c.req.query("hours")) || 24, 168);
+  return c.json(await recentObjectMatches(db, hours));
 });
 app.get("/objects/:rw", async (c) => {
   const rw = c.req.param("rw");
