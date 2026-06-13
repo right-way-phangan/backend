@@ -1358,6 +1358,7 @@ async function getLead(db2, id) {
     tags: leads.tags,
     createdAt: leads.createdAt,
     updatedAt: leads.updatedAt,
+    contactId: leads.contactId,
     contactName: contacts.firstName,
     email: contacts.email,
     phone: contacts.phone,

@@ -287,6 +287,7 @@ export async function getLead(db: AnyPgDatabase, id: number) {
       tags: leads.tags,
       createdAt: leads.createdAt,
       updatedAt: leads.updatedAt,
+      contactId: leads.contactId,
       contactName: contacts.firstName,
       email: contacts.email,
       phone: contacts.phone,
