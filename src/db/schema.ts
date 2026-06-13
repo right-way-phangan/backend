@@ -299,6 +299,7 @@ export const leads = pgTable(
     lostReason: text("lost_reason"), // why the deal was lost (price | changed-mind | competitor | no-reply | other:…)
     dealValue: doublePrecision("deal_value"), // expected deal size, THB — pipeline money on the dashboard
     commissionValue: doublePrecision("commission_value"), // actual commission, THB — deals ledger (co-agency/referral splits make it ≠ formula)
+    dealChecklist: jsonb("deal_checklist").$type<Record<string, string>>(), // transaction steps: stepKey → ISO done-at; absent = not done
     amoLeadId: bigint("amo_lead_id", { mode: "number" }).unique(), // migration traceability
     rwNumber: text("rw_number"), // object the inquiry is about, if any
     source: text("source"), // "object" | "contact"

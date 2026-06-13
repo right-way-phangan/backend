@@ -21,6 +21,7 @@ import { createObject, updateObject, addObjectPhotos, ObjectInputError } from ".
 import {
   createLead, listLeads, listPipelines, updateLead, seedCrm,
   getLead, addNote, addTask, updateTask, listTasks, updateLeadContact, deleteLead,
+  setDealChecklistItem,
   listEvents, listContacts, addTouch, addShortlistView, mergeContacts,
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
@@ -290,6 +291,18 @@ app.post("/leads/:id/tasks", async (c) => {
   const { title, dueAt } = await c.req.json();
   const res = await addTask(db, Number(c.req.param("id")), String(title ?? ""), dueAt ?? null);
   return res ? c.json(res, 201) : c.json({ error: "empty title" }, 400);
+});
+
+/** Toggle a transaction-checklist step: { key, done } → updated checklist. */
+app.patch("/leads/:id/deal-checklist", async (c) => {
+  const { key, done } = await c.req.json();
+  const res = await setDealChecklistItem(
+    db,
+    Number(c.req.param("id")),
+    String(key ?? ""),
+    Boolean(done),
+  );
+  return res ? c.json(res) : c.json({ error: "lead not found or empty key" }, 400);
 });
 
 /** Patch a task: { done?, dueAt? } — toggle + reschedule (snooze). */

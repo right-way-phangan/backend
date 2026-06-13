@@ -272,6 +272,8 @@ var leads = pgTable(
     // expected deal size, THB — pipeline money on the dashboard
     commissionValue: doublePrecision("commission_value"),
     // actual commission, THB — deals ledger (co-agency/referral splits make it ≠ formula)
+    dealChecklist: jsonb("deal_checklist").$type(),
+    // transaction steps: stepKey → ISO done-at; absent = not done
     amoLeadId: bigint("amo_lead_id", { mode: "number" }).unique(),
     // migration traceability
     rwNumber: text("rw_number"),
@@ -756,6 +758,7 @@ async function listLeads(db2, limit = 500) {
     lostReason: leads.lostReason,
     dealValue: leads.dealValue,
     commissionValue: leads.commissionValue,
+    dealChecklist: leads.dealChecklist,
     rwNumber: leads.rwNumber,
     source: leads.source,
     kind: leads.kind,
@@ -809,6 +812,7 @@ async function getLead(db2, id) {
     lostReason: leads.lostReason,
     dealValue: leads.dealValue,
     commissionValue: leads.commissionValue,
+    dealChecklist: leads.dealChecklist,
     rwNumber: leads.rwNumber,
     source: leads.source,
     kind: leads.kind,
@@ -863,6 +867,16 @@ async function addShortlistView(db2, leadId) {
   await db2.insert(leadEvents).values({ leadId, type: "shortlist_view", toStage: "\u{1F440} \u041E\u0442\u043A\u0440\u044B\u043B \u043F\u043E\u0434\u0431\u043E\u0440\u043A\u0443" });
   await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq2(leads.id, leadId));
   return { id: leadId, recorded: true };
+}
+async function setDealChecklistItem(db2, leadId, key, done) {
+  if (!key.trim()) return null;
+  const [lead] = await db2.select({ checklist: leads.dealChecklist }).from(leads).where(eq2(leads.id, leadId));
+  if (!lead) return null;
+  const checklist = { ...lead.checklist ?? {} };
+  if (done) checklist[key] = (/* @__PURE__ */ new Date()).toISOString();
+  else delete checklist[key];
+  await db2.update(leads).set({ dealChecklist: checklist, updatedAt: /* @__PURE__ */ new Date() }).where(eq2(leads.id, leadId));
+  return checklist;
 }
 async function addNote(db2, leadId, text2) {
   if (!text2.trim()) return null;
@@ -2212,6 +2226,16 @@ app.post("/leads/:id/tasks", async (c) => {
   const { title, dueAt } = await c.req.json();
   const res = await addTask(db, Number(c.req.param("id")), String(title ?? ""), dueAt ?? null);
   return res ? c.json(res, 201) : c.json({ error: "empty title" }, 400);
+});
+app.patch("/leads/:id/deal-checklist", async (c) => {
+  const { key, done } = await c.req.json();
+  const res = await setDealChecklistItem(
+    db,
+    Number(c.req.param("id")),
+    String(key ?? ""),
+    Boolean(done)
+  );
+  return res ? c.json(res) : c.json({ error: "lead not found or empty key" }, 400);
 });
 app.patch("/tasks/:id", async (c) => {
   const patch = await c.req.json();

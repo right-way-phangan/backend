@@ -202,6 +202,7 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
       lostReason: leads.lostReason,
       dealValue: leads.dealValue,
       commissionValue: leads.commissionValue,
+      dealChecklist: leads.dealChecklist,
       rwNumber: leads.rwNumber,
       source: leads.source,
       kind: leads.kind,
@@ -281,6 +282,7 @@ export async function getLead(db: AnyPgDatabase, id: number) {
       lostReason: leads.lostReason,
       dealValue: leads.dealValue,
       commissionValue: leads.commissionValue,
+      dealChecklist: leads.dealChecklist,
       rwNumber: leads.rwNumber,
       source: leads.source,
       kind: leads.kind,
@@ -357,6 +359,33 @@ export async function addShortlistView(db: AnyPgDatabase, leadId: number) {
   await db.insert(leadEvents).values({ leadId, type: "shortlist_view", toStage: "👀 Открыл подборку" });
   await db.update(leads).set({ updatedAt: new Date() }).where(eq(leads.id, leadId));
   return { id: leadId, recorded: true };
+}
+
+/**
+ * Toggle one transaction-checklist step on a deal. Stores stepKey → ISO done-at
+ * (absent = not done) in leads.deal_checklist, so a deal in reservation→transfer
+ * has a concrete "what's left to close" list. Returns the updated checklist.
+ */
+export async function setDealChecklistItem(
+  db: AnyPgDatabase,
+  leadId: number,
+  key: string,
+  done: boolean,
+): Promise<Record<string, string> | null> {
+  if (!key.trim()) return null;
+  const [lead] = await db
+    .select({ checklist: leads.dealChecklist })
+    .from(leads)
+    .where(eq(leads.id, leadId));
+  if (!lead) return null;
+  const checklist: Record<string, string> = { ...(lead.checklist ?? {}) };
+  if (done) checklist[key] = new Date().toISOString();
+  else delete checklist[key];
+  await db
+    .update(leads)
+    .set({ dealChecklist: checklist, updatedAt: new Date() })
+    .where(eq(leads.id, leadId));
+  return checklist;
 }
 
 export async function addNote(db: AnyPgDatabase, leadId: number, text: string) {
