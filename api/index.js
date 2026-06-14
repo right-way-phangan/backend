@@ -663,7 +663,7 @@ async function assembleAll(db2) {
 }
 async function getPublicObjects(db2) {
   const all = await assembleAll(db2);
-  return all.filter((o) => o.rwNumber && o.status === "Active" && !!o.coverImage).sort(sortByRecentAndPremium);
+  return all.filter((o) => o.rwNumber && o.status === "Active" && !!o.coverImage).filter((o) => !!o.priceThb || !!o.descriptionRaw?.trim()).sort(sortByRecentAndPremium);
 }
 async function assembleUnits(db2) {
   const rows = await db2.select({

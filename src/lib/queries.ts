@@ -41,6 +41,13 @@ export async function getPublicObjects(db: AnyPgDatabase): Promise<RealEstateObj
   const all = await assembleAll(db);
   return all
     .filter((o) => o.rwNumber && o.status === "Active" && !!o.coverImage)
+    // Hide un-enriched intake shells: a listing with neither a price nor any
+    // description is an empty stub (e.g. cold-call-sourced RW-L plots) —
+    // publishing it is thin, near-duplicate content that drags the whole
+    // domain's SEO and disappoints clicks. It stays in /objects/all (admin/CRM)
+    // and reappears here automatically once a price or description is added —
+    // no manual re-listing needed (same pattern as the cover-photo gate above).
+    .filter((o) => !!o.priceThb || !!o.descriptionRaw?.trim())
     .sort(sortByRecentAndPremium);
 }
 
