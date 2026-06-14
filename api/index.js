@@ -26,12 +26,16 @@ __export(schema_exports, {
   leadTasks: () => leadTasks,
   leads: () => leads,
   objectDocs: () => objectDocs,
+  objectEventsDaily: () => objectEventsDaily,
   objectPhotos: () => objectPhotos,
+  objectViewVisitors: () => objectViewVisitors,
   objectViewsDaily: () => objectViewsDaily,
   objects: () => objects,
   pipelines: () => pipelines,
   processedUpdates: () => processedUpdates,
   projectUnits: () => projectUnits,
+  referralsDaily: () => referralsDaily,
+  searchEvents: () => searchEvents,
   stages: () => stages,
   users: () => users,
   valuationComps: () => valuationComps,
@@ -218,6 +222,65 @@ var objectViewsDaily = pgTable(
     views: integer("views").notNull().default(0)
   },
   (t) => ({ pk: primaryKey({ columns: [t.rwNumber, t.day] }) })
+);
+var searchEvents = pgTable(
+  "search_events",
+  {
+    id: serial("id").primaryKey(),
+    kind: text("kind").notNull().default("filter"),
+    // nl | filter
+    query: text("query"),
+    // raw NL phrase (kind=nl)
+    matched: boolean("matched"),
+    // did the NL query map to any filter? (kind=nl)
+    types: text("types").array(),
+    districts: text("districts").array(),
+    tenure: text("tenure").array(),
+    features: text("features").array(),
+    // beachfront | seaView | mountainView
+    priceMinM: doublePrecision("price_min_m"),
+    // millions THB
+    priceMaxM: doublePrecision("price_max_m"),
+    bedroomsMin: doublePrecision("bedrooms_min"),
+    resultCount: integer("result_count"),
+    locale: text("locale"),
+    // en | ru
+    day: text("day").notNull(),
+    // YYYY-MM-DD, Asia/Bangkok
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({ createdIdx: index("search_events_created_idx").on(t.createdAt) })
+);
+var objectEventsDaily = pgTable(
+  "object_events_daily",
+  {
+    rwNumber: text("rw_number").notNull(),
+    // '__site__' for non-object events
+    kind: text("kind").notNull(),
+    day: text("day").notNull(),
+    // YYYY-MM-DD, Asia/Bangkok
+    count: integer("count").notNull().default(0)
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.rwNumber, t.kind, t.day] }) })
+);
+var objectViewVisitors = pgTable(
+  "object_view_visitors",
+  {
+    rwNumber: text("rw_number").notNull(),
+    vid: text("vid").notNull(),
+    day: text("day").notNull()
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.rwNumber, t.vid, t.day] }) })
+);
+var referralsDaily = pgTable(
+  "referrals_daily",
+  {
+    source: text("source").notNull(),
+    // ai:perplexity | search:google | social:telegram | direct | …
+    day: text("day").notNull(),
+    count: integer("count").notNull().default(0)
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.source, t.day] }) })
 );
 var pipelines = pgTable("pipelines", {
   id: serial("id").primaryKey(),
@@ -1569,15 +1632,15 @@ async function createObject(db2, input) {
   return { rwNumber, id, url: `${base}/object/${rwNumber}` };
 }
 async function addObjectPhotos(db2, rwNumber, urls) {
-  const clean = urls.map((u2) => String(u2).trim()).filter((u2) => /^https?:\/\//i.test(u2));
+  const clean2 = urls.map((u2) => String(u2).trim()).filter((u2) => /^https?:\/\//i.test(u2));
   const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq4(objects.rwNumber, rwNumber));
   if (!obj) return null;
-  if (clean.length === 0) return { rwNumber, added: 0, coverSet: false };
+  if (clean2.length === 0) return { rwNumber, added: 0, coverSet: false };
   const existing = await db2.select({ sort: objectPhotos.sort }).from(objectPhotos).where(eq4(objectPhotos.objectId, obj.id));
   const hadPhotos = existing.length > 0;
   const startSort = existing.reduce((m, r) => Math.max(m, r.sort + 1), 0);
   await db2.insert(objectPhotos).values(
-    clean.map((url, i) => ({
+    clean2.map((url, i) => ({
       objectId: obj.id,
       url,
       sort: startSort + i,
@@ -1585,7 +1648,7 @@ async function addObjectPhotos(db2, rwNumber, urls) {
     }))
   );
   await db2.update(objects).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq4(objects.id, obj.id));
-  return { rwNumber, added: clean.length, coverSet: !hadPhotos };
+  return { rwNumber, added: clean2.length, coverSet: !hadPhotos };
 }
 var PATCHABLE = /* @__PURE__ */ new Set([
   "status",
@@ -1597,6 +1660,7 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "documentType",
   "tenure",
   "descriptionRaw",
+  "areaNote",
   "locationUrl",
   "developer",
   "completion",
@@ -1654,39 +1718,224 @@ async function verifyLogin(db2, email, password) {
   return { id: u2.id, email: u2.email, name: u2.name, role: u2.role };
 }
 
-// src/lib/views.ts
-import { eq as eq6, sql as sql3 } from "drizzle-orm";
+// src/lib/demand.ts
+import { gte as gte3 } from "drizzle-orm";
 function bangkokDay(offsetDays = 0) {
   return new Date(Date.now() + 7 * 36e5 + offsetDays * 864e5).toISOString().slice(0, 10);
 }
-async function trackView(db2, rwNumber) {
+var clean = (xs) => Array.isArray(xs) ? xs.map((s) => String(s).slice(0, 60)).filter(Boolean).slice(0, 12) : [];
+async function recordSearch(db2, input) {
+  const [row] = await db2.insert(searchEvents).values({
+    kind: input.kind === "nl" ? "nl" : "filter",
+    query: input.query ? String(input.query).slice(0, 200) : null,
+    matched: input.matched ?? null,
+    types: clean(input.types),
+    districts: clean(input.districts),
+    tenure: clean(input.tenure),
+    features: clean(input.features),
+    priceMinM: input.priceMinM ?? null,
+    priceMaxM: input.priceMaxM ?? null,
+    bedroomsMin: input.bedroomsMin ?? null,
+    resultCount: input.resultCount ?? null,
+    locale: input.locale ? String(input.locale).slice(0, 5) : null,
+    day: bangkokDay()
+  }).returning({ id: searchEvents.id });
+  return row?.id ?? 0;
+}
+var PRICE_BANDS = [
+  { label: "< \u0E3F5M", lo: 0, hi: 5 },
+  { label: "\u0E3F5\u201310M", lo: 5, hi: 10 },
+  { label: "\u0E3F10\u201320M", lo: 10, hi: 20 },
+  { label: "\u0E3F20\u201330M", lo: 20, hi: 30 },
+  { label: "\u0E3F30\u201350M", lo: 30, hi: 50 },
+  { label: "\u0E3F50M+", lo: 50, hi: Infinity }
+];
+function tally(map) {
+  return [...map.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+}
+async function demandSummary(db2, windowDays = 90) {
+  const since = new Date(Date.now() - windowDays * 864e5);
+  const rows = await db2.select().from(searchEvents).where(gte3(searchEvents.createdAt, since));
+  const districts = /* @__PURE__ */ new Map();
+  const types = /* @__PURE__ */ new Map();
+  const tenure = /* @__PURE__ */ new Map();
+  const features = /* @__PURE__ */ new Map();
+  const beds = /* @__PURE__ */ new Map();
+  const bands = /* @__PURE__ */ new Map();
+  const queries = /* @__PURE__ */ new Map();
+  const zero = /* @__PURE__ */ new Map();
+  let nlCount = 0;
+  let filterCount = 0;
+  const FEATURE_LABEL = {
+    beachfront: "Beachfront",
+    seaView: "Sea view",
+    seaview: "Sea view",
+    mountainView: "Mountain view",
+    mountainview: "Mountain view"
+  };
+  for (const r of rows) {
+    if (r.kind === "nl") nlCount++;
+    else filterCount++;
+    for (const d of r.districts ?? []) districts.set(d, (districts.get(d) ?? 0) + 1);
+    for (const t of r.types ?? []) types.set(t, (types.get(t) ?? 0) + 1);
+    for (const tn of r.tenure ?? []) tenure.set(tn, (tenure.get(tn) ?? 0) + 1);
+    for (const f of r.features ?? []) {
+      const label = FEATURE_LABEL[f] ?? f;
+      features.set(label, (features.get(label) ?? 0) + 1);
+    }
+    if (r.bedroomsMin) {
+      const k = `${r.bedroomsMin}+`;
+      beds.set(k, (beds.get(k) ?? 0) + 1);
+    }
+    const p = r.priceMaxM ?? r.priceMinM;
+    if (p != null) {
+      const band = PRICE_BANDS.find((b) => p >= b.lo && p < b.hi);
+      if (band) bands.set(band.label, (bands.get(band.label) ?? 0) + 1);
+    }
+    if (r.kind === "nl" && r.query) {
+      const q = r.query.trim().toLowerCase();
+      const cur = queries.get(q) ?? { count: 0, matched: 0 };
+      cur.count++;
+      if (r.matched) cur.matched++;
+      queries.set(q, cur);
+      if (r.matched === false || r.resultCount != null && r.resultCount === 0) {
+        zero.set(q, (zero.get(q) ?? 0) + 1);
+      }
+    }
+  }
+  const priceBands = PRICE_BANDS.filter((b) => bands.has(b.label)).map((b) => ({
+    name: b.label,
+    count: bands.get(b.label)
+  }));
+  return {
+    windowDays,
+    total: rows.length,
+    nlCount,
+    filterCount,
+    byDistrict: tally(districts),
+    byType: tally(types),
+    byTenure: tally(tenure),
+    byFeature: tally(features),
+    byBeds: tally(beds).sort((a, b) => parseInt(a.name) - parseInt(b.name)),
+    priceBands,
+    topQueries: [...queries.entries()].map(([query, v]) => ({ query, count: v.count, matched: v.matched })).sort((a, b) => b.count - a.count).slice(0, 25),
+    zeroResultQueries: [...zero.entries()].map(([query, count]) => ({ query, count })).sort((a, b) => b.count - a.count).slice(0, 25)
+  };
+}
+
+// src/lib/views.ts
+import { eq as eq6, sql as sql3 } from "drizzle-orm";
+function bangkokDay2(offsetDays = 0) {
+  return new Date(Date.now() + 7 * 36e5 + offsetDays * 864e5).toISOString().slice(0, 10);
+}
+async function trackView(db2, rwNumber, vid) {
   const found = await db2.select({ id: objects.id }).from(objects).where(eq6(objects.rwNumber, rwNumber)).limit(1);
   if (found.length === 0) return false;
-  await db2.insert(objectViewsDaily).values({ rwNumber, day: bangkokDay(), views: 1 }).onConflictDoUpdate({
+  const day = bangkokDay2();
+  await db2.insert(objectViewsDaily).values({ rwNumber, day, views: 1 }).onConflictDoUpdate({
     target: [objectViewsDaily.rwNumber, objectViewsDaily.day],
     set: { views: sql3`${objectViewsDaily.views} + 1` }
   });
+  if (vid) {
+    await db2.insert(objectViewVisitors).values({ rwNumber, vid: vid.slice(0, 40), day }).onConflictDoNothing();
+  }
   return true;
 }
 async function viewsSummary(db2) {
-  const from7 = bangkokDay(-6);
-  const from30 = bangkokDay(-29);
-  const rows = await db2.select({
-    rwNumber: objectViewsDaily.rwNumber,
-    d7: sql3`coalesce(sum(${objectViewsDaily.views}) filter (where ${objectViewsDaily.day} >= ${from7}), 0)`,
-    d30: sql3`coalesce(sum(${objectViewsDaily.views}) filter (where ${objectViewsDaily.day} >= ${from30}), 0)`,
-    total: sql3`sum(${objectViewsDaily.views})`
-  }).from(objectViewsDaily).groupBy(objectViewsDaily.rwNumber);
+  const from7 = bangkokDay2(-6);
+  const from30 = bangkokDay2(-29);
+  const [rows, uniqRows] = await Promise.all([
+    db2.select({
+      rwNumber: objectViewsDaily.rwNumber,
+      d7: sql3`coalesce(sum(${objectViewsDaily.views}) filter (where ${objectViewsDaily.day} >= ${from7}), 0)`,
+      d30: sql3`coalesce(sum(${objectViewsDaily.views}) filter (where ${objectViewsDaily.day} >= ${from30}), 0)`,
+      total: sql3`sum(${objectViewsDaily.views})`
+    }).from(objectViewsDaily).groupBy(objectViewsDaily.rwNumber),
+    db2.select({
+      rwNumber: objectViewVisitors.rwNumber,
+      uniques30: sql3`count(distinct ${objectViewVisitors.vid})`
+    }).from(objectViewVisitors).where(sql3`${objectViewVisitors.day} >= ${from30}`).groupBy(objectViewVisitors.rwNumber)
+  ]);
+  const uniqByRw = new Map(uniqRows.map((u2) => [u2.rwNumber, Number(u2.uniques30)]));
   return rows.map((r) => ({
     rwNumber: r.rwNumber,
     d7: Number(r.d7),
     d30: Number(r.d30),
-    total: Number(r.total)
+    total: Number(r.total),
+    uniques30: uniqByRw.get(r.rwNumber) ?? 0
   }));
+}
+async function crossShopperCount(db2) {
+  const from30 = bangkokDay2(-29);
+  const rows = await db2.select({ vid: objectViewVisitors.vid }).from(objectViewVisitors).where(sql3`${objectViewVisitors.day} >= ${from30}`).groupBy(objectViewVisitors.vid).having(sql3`count(distinct ${objectViewVisitors.rwNumber}) >= 2`);
+  return rows.length;
+}
+
+// src/lib/events.ts
+import { eq as eq7, sql as sql4 } from "drizzle-orm";
+var SITE = "__site__";
+var OBJECT_KINDS = /* @__PURE__ */ new Set([
+  "wa_click",
+  "tg_click",
+  "phone_click",
+  "email_click",
+  "save",
+  "calc",
+  "brochure",
+  "share"
+]);
+var SITE_KINDS = /* @__PURE__ */ new Set(["form_start", "form_submit", "wa_click", "tg_click", "phone_click", "email_click"]);
+function bangkokDay3(offsetDays = 0) {
+  return new Date(Date.now() + 7 * 36e5 + offsetDays * 864e5).toISOString().slice(0, 10);
+}
+async function trackEvent(db2, rwNumber, kind) {
+  const rw = (rwNumber || "").trim() || SITE;
+  if (rw === SITE) {
+    if (!SITE_KINDS.has(kind)) return false;
+  } else {
+    if (!OBJECT_KINDS.has(kind)) return false;
+    const found = await db2.select({ id: objects.id }).from(objects).where(eq7(objects.rwNumber, rw)).limit(1);
+    if (found.length === 0) return false;
+  }
+  await db2.insert(objectEventsDaily).values({ rwNumber: rw, kind, day: bangkokDay3(), count: 1 }).onConflictDoUpdate({
+    target: [objectEventsDaily.rwNumber, objectEventsDaily.kind, objectEventsDaily.day],
+    set: { count: sql4`${objectEventsDaily.count} + 1` }
+  });
+  return true;
+}
+async function eventsSummary(db2) {
+  const from7 = bangkokDay3(-6);
+  const from30 = bangkokDay3(-29);
+  const rows = await db2.select({
+    rwNumber: objectEventsDaily.rwNumber,
+    kind: objectEventsDaily.kind,
+    d7: sql4`coalesce(sum(${objectEventsDaily.count}) filter (where ${objectEventsDaily.day} >= ${from7}), 0)`,
+    d30: sql4`coalesce(sum(${objectEventsDaily.count}) filter (where ${objectEventsDaily.day} >= ${from30}), 0)`
+  }).from(objectEventsDaily).groupBy(objectEventsDaily.rwNumber, objectEventsDaily.kind);
+  return rows.map((r) => ({ rwNumber: r.rwNumber, kind: r.kind, d7: Number(r.d7), d30: Number(r.d30) }));
+}
+async function trackReferral(db2, source) {
+  const s = (source || "").trim().slice(0, 40);
+  if (!s) return false;
+  await db2.insert(referralsDaily).values({ source: s, day: bangkokDay3(), count: 1 }).onConflictDoUpdate({
+    target: [referralsDaily.source, referralsDaily.day],
+    set: { count: sql4`${referralsDaily.count} + 1` }
+  });
+  return true;
+}
+async function referralsSummary(db2) {
+  const from7 = bangkokDay3(-6);
+  const from30 = bangkokDay3(-29);
+  const rows = await db2.select({
+    source: referralsDaily.source,
+    d7: sql4`coalesce(sum(${referralsDaily.count}) filter (where ${referralsDaily.day} >= ${from7}), 0)`,
+    d30: sql4`coalesce(sum(${referralsDaily.count}) filter (where ${referralsDaily.day} >= ${from30}), 0)`
+  }).from(referralsDaily).where(sql4`${referralsDaily.day} >= ${from30}`).groupBy(referralsDaily.source);
+  return rows.map((r) => ({ source: r.source, d7: Number(r.d7), d30: Number(r.d30) })).sort((a, b) => b.d30 - a.d30);
 }
 
 // src/lib/articles.ts
-import { eq as eq7, and as and3, desc as desc2, sql as sql4, inArray } from "drizzle-orm";
+import { eq as eq8, and as and3, desc as desc2, sql as sql5, inArray } from "drizzle-orm";
 var ArticleInputError = class extends Error {
 };
 var STATUSES = ["pending", "published", "rejected"];
@@ -1708,8 +1957,8 @@ async function createArticle(db2, input) {
   let slug = input.slug?.trim() || slugify(title) || `article-${Date.now()}`;
   const existing = await db2.select({ slug: articles.slug }).from(articles).where(
     and3(
-      eq7(articles.lang, lang),
-      sql4`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
+      eq8(articles.lang, lang),
+      sql5`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
     )
   );
   if (existing.some((r) => r.slug === slug)) {
@@ -1734,24 +1983,24 @@ async function createArticle(db2, input) {
 }
 async function listArticles(db2, opts = {}) {
   const conds = [];
-  if (opts.status) conds.push(eq7(articles.status, opts.status));
-  if (opts.lang) conds.push(eq7(articles.lang, opts.lang));
-  return db2.select().from(articles).where(conds.length ? and3(...conds) : void 0).orderBy(desc2(sql4`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
+  if (opts.status) conds.push(eq8(articles.status, opts.status));
+  if (opts.lang) conds.push(eq8(articles.lang, opts.lang));
+  return db2.select().from(articles).where(conds.length ? and3(...conds) : void 0).orderBy(desc2(sql5`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
 }
 async function getArticleById(db2, id) {
-  const [row] = await db2.select().from(articles).where(eq7(articles.id, id)).limit(1);
+  const [row] = await db2.select().from(articles).where(eq8(articles.id, id)).limit(1);
   return row ?? null;
 }
 async function getArticleBySlug(db2, slug, lang) {
-  const conds = [eq7(articles.slug, slug)];
-  if (lang) conds.push(eq7(articles.lang, lang));
+  const conds = [eq8(articles.slug, slug)];
+  if (lang) conds.push(eq8(articles.lang, lang));
   const [row] = await db2.select().from(articles).where(and3(...conds)).limit(1);
   return row ?? null;
 }
 async function countPending(db2, lang) {
-  const conds = [eq7(articles.status, "pending")];
-  if (lang) conds.push(eq7(articles.lang, lang));
-  const [r] = await db2.select({ n: sql4`count(*)::int` }).from(articles).where(and3(...conds));
+  const conds = [eq8(articles.status, "pending")];
+  if (lang) conds.push(eq8(articles.lang, lang));
+  const [r] = await db2.select({ n: sql5`count(*)::int` }).from(articles).where(and3(...conds));
   return r?.n ?? 0;
 }
 async function updateArticle(db2, id, patch) {
@@ -1771,17 +2020,17 @@ async function updateArticle(db2, id, patch) {
   }
   if (patch.takeaways !== void 0) set.takeaways = patch.takeaways;
   if (patch.coverImage !== void 0) set.coverImage = patch.coverImage;
-  const [row] = await db2.update(articles).set(set).where(eq7(articles.id, id)).returning();
+  const [row] = await db2.update(articles).set(set).where(eq8(articles.id, id)).returning();
   return row ?? null;
 }
 async function deleteArticle(db2, id) {
-  const res = await db2.delete(articles).where(eq7(articles.id, id)).returning({ id: articles.id });
+  const res = await db2.delete(articles).where(eq8(articles.id, id)).returning({ id: articles.id });
   return res.length > 0;
 }
 
 // src/lib/contact-bot.ts
-import { eq as eq8 } from "drizzle-orm";
-var SITE = "https://rightwaygroup.co";
+import { eq as eq9 } from "drizzle-orm";
+var SITE2 = "https://rightwaygroup.co";
 var FLOOD_WINDOW_MS = 6e4;
 var FLOOD_MAX = 16;
 var GREETING = "\u{1F334} *Right Way Phangan*\n\nHi! Send your question about land, villas or houses on Koh Phangan \u2014 a real person will reply here. Feel free to share your budget, area or a listing link.\n\n\u041F\u0440\u0438\u0432\u0435\u0442! \u041D\u0430\u043F\u0438\u0448\u0438\u0442\u0435 \u0432\u0430\u0448 \u0432\u043E\u043F\u0440\u043E\u0441 \u043F\u043E \u0437\u0435\u043C\u043B\u0435, \u0432\u0438\u043B\u043B\u0430\u043C \u0438 \u0434\u043E\u043C\u0430\u043C \u043D\u0430 \u041F\u0430\u043D\u0433\u0430\u043D\u0435 \u2014 \u043E\u0442\u0432\u0435\u0442\u0438\u0442 \u0436\u0438\u0432\u043E\u0439 \u0447\u0435\u043B\u043E\u0432\u0435\u043A. \u041C\u043E\u0436\u043D\u043E \u0441\u0440\u0430\u0437\u0443 \u0443\u043A\u0430\u0437\u0430\u0442\u044C \u0431\u044E\u0434\u0436\u0435\u0442, \u0440\u0430\u0439\u043E\u043D \u0438\u043B\u0438 \u0441\u0441\u044B\u043B\u043A\u0443 \u043D\u0430 \u043E\u0431\u044A\u0435\u043A\u0442.";
@@ -1789,9 +2038,9 @@ var CLIENT_ACK = "\u0421\u043F\u0430\u0441\u0438\u0431\u043E! \u0421\u043E\u043E
 var COMMANDS = {
   "/start": GREETING,
   "/help": GREETING,
-  "/listings": `Our current listings with photos, map and filters: ${SITE}/listings \u{1F3DD}\uFE0F`,
-  "/site": `Right Way Phangan: ${SITE}`,
-  "/calculator": `Estimate rental yield / ROI here: ${SITE}/calculator \u{1F4CA}`,
+  "/listings": `Our current listings with photos, map and filters: ${SITE2}/listings \u{1F3DD}\uFE0F`,
+  "/site": `Right Way Phangan: ${SITE2}`,
+  "/calculator": `Estimate rental yield / ROI here: ${SITE2}/calculator \u{1F4CA}`,
   "/contact": `Email hello@rightwaygroup.co \xB7 Telegram channel https://t.me/rightwayphangan \xB7 WhatsApp https://wa.me/66843627784`
 };
 async function tg(cfg, method, body) {
@@ -1832,7 +2081,7 @@ async function handleContactUpdate(db2, update, cfg) {
   if (!msg || !msg.from || msg.from.is_bot) return;
   if (msg.from.id === cfg.ownerId) {
     if (!msg.reply_to_message) return;
-    const rows = await db2.select().from(contactThreads).where(eq8(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
+    const rows = await db2.select().from(contactThreads).where(eq9(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
     const thread = rows[0];
     if (!thread) {
       await tg(cfg, "sendMessage", {
@@ -1874,7 +2123,7 @@ async function handleContactUpdate(db2, update, cfg) {
       return;
     }
   }
-  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq8(contactThreads.clientChatId, msg.chat.id));
+  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq9(contactThreads.clientChatId, msg.chat.id));
   const firstContact = history.length === 0;
   const cutoff = new Date(Date.now() - FLOOD_WINDOW_MS);
   const recent = history.filter((h2) => h2.createdAt > cutoff).length;
@@ -1941,7 +2190,7 @@ ${problems.join("\n")}`,
 }
 
 // src/lib/valuation.ts
-import { eq as eq9, desc as desc3 } from "drizzle-orm";
+import { eq as eq10, desc as desc3 } from "drizzle-orm";
 var ValuationInputError = class extends Error {
 };
 async function listFactorOverrides(db2) {
@@ -1952,7 +2201,7 @@ async function setFactorOverrides(db2, entries) {
     const key = String(e.key ?? "").trim();
     if (!key) throw new ValuationInputError("factor key is required");
     if (e.value === null) {
-      await db2.delete(valuationFactors).where(eq9(valuationFactors.key, key));
+      await db2.delete(valuationFactors).where(eq10(valuationFactors.key, key));
       continue;
     }
     const value = Number(e.value);
@@ -2011,11 +2260,11 @@ async function updateComp(db2, id, patch) {
   }
   if (patch.note !== void 0) set.note = patch.note?.trim() || null;
   if (Object.keys(set).length === 0) return null;
-  const [row] = await db2.update(valuationComps).set(set).where(eq9(valuationComps.id, id)).returning();
+  const [row] = await db2.update(valuationComps).set(set).where(eq10(valuationComps.id, id)).returning();
   return row ?? null;
 }
 async function deleteComp(db2, id) {
-  const rows = await db2.delete(valuationComps).where(eq9(valuationComps.id, id)).returning();
+  const rows = await db2.delete(valuationComps).where(eq10(valuationComps.id, id)).returning();
   return rows.length > 0;
 }
 async function logValuation(db2, input) {
@@ -2149,8 +2398,8 @@ app.post("/objects/:rw/photos", async (c) => {
 });
 app.post("/track/view", async (c) => {
   try {
-    const { rw } = await c.req.json();
-    const ok = await trackView(db, String(rw ?? ""));
+    const { rw, vid } = await c.req.json();
+    const ok = await trackView(db, String(rw ?? ""), vid ? String(vid) : void 0);
     return c.json({ ok });
   } catch (err) {
     console.error("[POST /track/view]", err.message);
@@ -2159,6 +2408,50 @@ app.post("/track/view", async (c) => {
 });
 app.get("/views/summary", async (c) => {
   const data = await viewsSummary(db);
+  return c.json(data);
+});
+app.get("/views/cross-shoppers", async (c) => {
+  return c.json({ count: await crossShopperCount(db) });
+});
+app.post("/track/event", async (c) => {
+  try {
+    const { rw, kind } = await c.req.json();
+    const ok = await trackEvent(db, String(rw ?? ""), String(kind ?? ""));
+    return c.json({ ok });
+  } catch (err) {
+    console.error("[POST /track/event]", err.message);
+    return c.json({ ok: false }, 500);
+  }
+});
+app.get("/events/summary", async (c) => {
+  return c.json(await eventsSummary(db));
+});
+app.post("/track/referral", async (c) => {
+  try {
+    const { source } = await c.req.json();
+    const ok = await trackReferral(db, String(source ?? ""));
+    return c.json({ ok });
+  } catch (err) {
+    console.error("[POST /track/referral]", err.message);
+    return c.json({ ok: false }, 500);
+  }
+});
+app.get("/referrals/summary", async (c) => {
+  return c.json(await referralsSummary(db));
+});
+app.post("/track/search", async (c) => {
+  try {
+    const input = await c.req.json();
+    const id = await recordSearch(db, input ?? {});
+    return c.json({ ok: true, id });
+  } catch (err) {
+    console.error("[POST /track/search]", err.message);
+    return c.json({ ok: false }, 500);
+  }
+});
+app.get("/demand/summary", async (c) => {
+  const days = Math.min(Math.max(Number(c.req.query("days")) || 90, 1), 365);
+  const data = await demandSummary(db, days);
   return c.json(data);
 });
 app.post("/leads", async (c) => {
