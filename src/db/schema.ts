@@ -538,6 +538,16 @@ export const processedUpdates = pgTable("processed_updates", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+/** Key-value app settings — editable config without a redeploy. First use:
+ * `crm_monthly_target_thb` — the monthly commission goal («темп месяца» / цель). */
+export const appSettings = pgTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type AppSettingRow = typeof appSettings.$inferSelect;
+
 // ============================================================
 // «RW Оценка» — инструмент оценки недвижимости (/admin/valuation).
 // Движок (сравнительный + доходный + затратный методы) — чистая функция в

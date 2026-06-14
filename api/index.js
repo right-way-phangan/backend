@@ -18,6 +18,7 @@ import "dotenv/config";
 // src/db/schema.ts
 var schema_exports = {};
 __export(schema_exports, {
+  appSettings: () => appSettings,
   articles: () => articles,
   contactThreads: () => contactThreads,
   contacts: () => contacts,
@@ -442,6 +443,11 @@ var articles = pgTable(
 var processedUpdates = pgTable("processed_updates", {
   updateId: bigint("update_id", { mode: "number" }).primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+});
+var appSettings = pgTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
 });
 var valuationFactors = pgTable("valuation_factors", {
   key: text("key").primaryKey(),
@@ -1726,6 +1732,24 @@ async function verifyLogin(db2, email, password) {
   return { id: u2.id, email: u2.email, name: u2.name, role: u2.role };
 }
 
+// src/lib/settings.ts
+import { eq as eq6 } from "drizzle-orm";
+async function getSetting(db2, key) {
+  const [row] = await db2.select({ value: appSettings.value }).from(appSettings).where(eq6(appSettings.key, key));
+  return row?.value ?? null;
+}
+async function listSettings(db2) {
+  const rows = await db2.select().from(appSettings);
+  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+}
+async function setSetting(db2, key, value) {
+  if (value == null || value === "") {
+    await db2.delete(appSettings).where(eq6(appSettings.key, key));
+    return;
+  }
+  await db2.insert(appSettings).values({ key, value, updatedAt: /* @__PURE__ */ new Date() }).onConflictDoUpdate({ target: appSettings.key, set: { value, updatedAt: /* @__PURE__ */ new Date() } });
+}
+
 // src/lib/demand.ts
 import { gte as gte3 } from "drizzle-orm";
 function bangkokDay(offsetDays = 0) {
@@ -1832,12 +1856,12 @@ async function demandSummary(db2, windowDays = 90) {
 }
 
 // src/lib/views.ts
-import { eq as eq6, sql as sql3 } from "drizzle-orm";
+import { eq as eq7, sql as sql3 } from "drizzle-orm";
 function bangkokDay2(offsetDays = 0) {
   return new Date(Date.now() + 7 * 36e5 + offsetDays * 864e5).toISOString().slice(0, 10);
 }
 async function trackView(db2, rwNumber, vid) {
-  const found = await db2.select({ id: objects.id }).from(objects).where(eq6(objects.rwNumber, rwNumber)).limit(1);
+  const found = await db2.select({ id: objects.id }).from(objects).where(eq7(objects.rwNumber, rwNumber)).limit(1);
   if (found.length === 0) return false;
   const day = bangkokDay2();
   await db2.insert(objectViewsDaily).values({ rwNumber, day, views: 1 }).onConflictDoUpdate({
@@ -1880,7 +1904,7 @@ async function crossShopperCount(db2) {
 }
 
 // src/lib/events.ts
-import { eq as eq7, sql as sql4 } from "drizzle-orm";
+import { eq as eq8, sql as sql4 } from "drizzle-orm";
 var SITE = "__site__";
 var OBJECT_KINDS = /* @__PURE__ */ new Set([
   "wa_click",
@@ -1902,7 +1926,7 @@ async function trackEvent(db2, rwNumber, kind) {
     if (!SITE_KINDS.has(kind)) return false;
   } else {
     if (!OBJECT_KINDS.has(kind)) return false;
-    const found = await db2.select({ id: objects.id }).from(objects).where(eq7(objects.rwNumber, rw)).limit(1);
+    const found = await db2.select({ id: objects.id }).from(objects).where(eq8(objects.rwNumber, rw)).limit(1);
     if (found.length === 0) return false;
   }
   await db2.insert(objectEventsDaily).values({ rwNumber: rw, kind, day: bangkokDay3(), count: 1 }).onConflictDoUpdate({
@@ -1943,7 +1967,7 @@ async function referralsSummary(db2) {
 }
 
 // src/lib/articles.ts
-import { eq as eq8, and as and3, desc as desc2, sql as sql5, inArray } from "drizzle-orm";
+import { eq as eq9, and as and3, desc as desc2, sql as sql5, inArray } from "drizzle-orm";
 var ArticleInputError = class extends Error {
 };
 var STATUSES = ["pending", "published", "rejected"];
@@ -1965,7 +1989,7 @@ async function createArticle(db2, input) {
   let slug = input.slug?.trim() || slugify(title) || `article-${Date.now()}`;
   const existing = await db2.select({ slug: articles.slug }).from(articles).where(
     and3(
-      eq8(articles.lang, lang),
+      eq9(articles.lang, lang),
       sql5`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
     )
   );
@@ -1991,23 +2015,23 @@ async function createArticle(db2, input) {
 }
 async function listArticles(db2, opts = {}) {
   const conds = [];
-  if (opts.status) conds.push(eq8(articles.status, opts.status));
-  if (opts.lang) conds.push(eq8(articles.lang, opts.lang));
+  if (opts.status) conds.push(eq9(articles.status, opts.status));
+  if (opts.lang) conds.push(eq9(articles.lang, opts.lang));
   return db2.select().from(articles).where(conds.length ? and3(...conds) : void 0).orderBy(desc2(sql5`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
 }
 async function getArticleById(db2, id) {
-  const [row] = await db2.select().from(articles).where(eq8(articles.id, id)).limit(1);
+  const [row] = await db2.select().from(articles).where(eq9(articles.id, id)).limit(1);
   return row ?? null;
 }
 async function getArticleBySlug(db2, slug, lang) {
-  const conds = [eq8(articles.slug, slug)];
-  if (lang) conds.push(eq8(articles.lang, lang));
+  const conds = [eq9(articles.slug, slug)];
+  if (lang) conds.push(eq9(articles.lang, lang));
   const [row] = await db2.select().from(articles).where(and3(...conds)).limit(1);
   return row ?? null;
 }
 async function countPending(db2, lang) {
-  const conds = [eq8(articles.status, "pending")];
-  if (lang) conds.push(eq8(articles.lang, lang));
+  const conds = [eq9(articles.status, "pending")];
+  if (lang) conds.push(eq9(articles.lang, lang));
   const [r] = await db2.select({ n: sql5`count(*)::int` }).from(articles).where(and3(...conds));
   return r?.n ?? 0;
 }
@@ -2028,16 +2052,16 @@ async function updateArticle(db2, id, patch) {
   }
   if (patch.takeaways !== void 0) set.takeaways = patch.takeaways;
   if (patch.coverImage !== void 0) set.coverImage = patch.coverImage;
-  const [row] = await db2.update(articles).set(set).where(eq8(articles.id, id)).returning();
+  const [row] = await db2.update(articles).set(set).where(eq9(articles.id, id)).returning();
   return row ?? null;
 }
 async function deleteArticle(db2, id) {
-  const res = await db2.delete(articles).where(eq8(articles.id, id)).returning({ id: articles.id });
+  const res = await db2.delete(articles).where(eq9(articles.id, id)).returning({ id: articles.id });
   return res.length > 0;
 }
 
 // src/lib/contact-bot.ts
-import { eq as eq9 } from "drizzle-orm";
+import { eq as eq10 } from "drizzle-orm";
 var SITE2 = "https://rightwaygroup.co";
 var FLOOD_WINDOW_MS = 6e4;
 var FLOOD_MAX = 16;
@@ -2089,7 +2113,7 @@ async function handleContactUpdate(db2, update, cfg) {
   if (!msg || !msg.from || msg.from.is_bot) return;
   if (msg.from.id === cfg.ownerId) {
     if (!msg.reply_to_message) return;
-    const rows = await db2.select().from(contactThreads).where(eq9(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
+    const rows = await db2.select().from(contactThreads).where(eq10(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
     const thread = rows[0];
     if (!thread) {
       await tg(cfg, "sendMessage", {
@@ -2131,7 +2155,7 @@ async function handleContactUpdate(db2, update, cfg) {
       return;
     }
   }
-  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq9(contactThreads.clientChatId, msg.chat.id));
+  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq10(contactThreads.clientChatId, msg.chat.id));
   const firstContact = history.length === 0;
   const cutoff = new Date(Date.now() - FLOOD_WINDOW_MS);
   const recent = history.filter((h2) => h2.createdAt > cutoff).length;
@@ -2198,7 +2222,7 @@ ${problems.join("\n")}`,
 }
 
 // src/lib/valuation.ts
-import { eq as eq10, desc as desc3 } from "drizzle-orm";
+import { eq as eq11, desc as desc3 } from "drizzle-orm";
 var ValuationInputError = class extends Error {
 };
 async function listFactorOverrides(db2) {
@@ -2209,7 +2233,7 @@ async function setFactorOverrides(db2, entries) {
     const key = String(e.key ?? "").trim();
     if (!key) throw new ValuationInputError("factor key is required");
     if (e.value === null) {
-      await db2.delete(valuationFactors).where(eq10(valuationFactors.key, key));
+      await db2.delete(valuationFactors).where(eq11(valuationFactors.key, key));
       continue;
     }
     const value = Number(e.value);
@@ -2268,11 +2292,11 @@ async function updateComp(db2, id, patch) {
   }
   if (patch.note !== void 0) set.note = patch.note?.trim() || null;
   if (Object.keys(set).length === 0) return null;
-  const [row] = await db2.update(valuationComps).set(set).where(eq10(valuationComps.id, id)).returning();
+  const [row] = await db2.update(valuationComps).set(set).where(eq11(valuationComps.id, id)).returning();
   return row ?? null;
 }
 async function deleteComp(db2, id) {
-  const rows = await db2.delete(valuationComps).where(eq10(valuationComps.id, id)).returning();
+  const rows = await db2.delete(valuationComps).where(eq11(valuationComps.id, id)).returning();
   return rows.length > 0;
 }
 async function logValuation(db2, input) {
@@ -2498,6 +2522,21 @@ app.patch("/leads/:id", async (c) => {
 app.get("/leads/:id", async (c) => {
   const res = await getLead(db, Number(c.req.param("id")));
   return res ? c.json(res) : c.json({ error: "not found" }, 404);
+});
+app.get("/settings", async (c) => c.json(await listSettings(db)));
+app.get("/settings/:key", async (c) => {
+  const value = await getSetting(db, c.req.param("key"));
+  return value == null ? c.json({ error: "not found" }, 404) : c.json({ key: c.req.param("key"), value });
+});
+app.put("/settings/:key", async (c) => {
+  try {
+    const { value } = await c.req.json();
+    await setSetting(db, c.req.param("key"), value == null ? null : String(value));
+    return c.json({ ok: true });
+  } catch (err) {
+    console.error("[PUT /settings]", err);
+    return c.json({ error: "set setting failed" }, 500);
+  }
 });
 app.patch("/leads/:id/contact", async (c) => {
   try {

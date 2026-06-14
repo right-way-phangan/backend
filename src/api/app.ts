@@ -25,6 +25,7 @@ import {
   listEvents, listContacts, addTouch, addShortlistView, mergeContacts,
 } from "../lib/crm";
 import { verifyLogin } from "../lib/auth";
+import { getSetting, listSettings, setSetting } from "../lib/settings";
 import { recordSearch, demandSummary } from "../lib/demand";
 import { trackView, viewsSummary, crossShopperCount } from "../lib/views";
 import { trackEvent, eventsSummary, trackReferral, referralsSummary } from "../lib/events";
@@ -323,6 +324,23 @@ app.patch("/leads/:id", async (c) => {
 app.get("/leads/:id", async (c) => {
   const res = await getLead(db, Number(c.req.param("id")));
   return res ? c.json(res) : c.json({ error: "not found" }, 404);
+});
+
+/** App settings (key-value) — editable config, e.g. crm_monthly_target_thb. */
+app.get("/settings", async (c) => c.json(await listSettings(db)));
+app.get("/settings/:key", async (c) => {
+  const value = await getSetting(db, c.req.param("key"));
+  return value == null ? c.json({ error: "not found" }, 404) : c.json({ key: c.req.param("key"), value });
+});
+app.put("/settings/:key", async (c) => {
+  try {
+    const { value } = await c.req.json();
+    await setSetting(db, c.req.param("key"), value == null ? null : String(value));
+    return c.json({ ok: true });
+  } catch (err) {
+    console.error("[PUT /settings]", err);
+    return c.json({ error: "set setting failed" }, 500);
+  }
 });
 
 /** Edit a lead's contact details + linked object (CRM detail card editor). */
