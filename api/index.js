@@ -337,6 +337,8 @@ var leads = pgTable(
     // actual commission, THB — deals ledger (co-agency/referral splits make it ≠ formula)
     dealChecklist: jsonb("deal_checklist").$type(),
     // transaction steps: stepKey → ISO done-at; absent = not done
+    expectedCloseAt: timestamp("expected_close_at", { withTimezone: true }),
+    // forecasted close date — monthly revenue forecast
     amoLeadId: bigint("amo_lead_id", { mode: "number" }).unique(),
     // migration traceability
     rwNumber: text("rw_number"),
@@ -822,6 +824,7 @@ async function listLeads(db2, limit = 500) {
     dealValue: leads.dealValue,
     commissionValue: leads.commissionValue,
     dealChecklist: leads.dealChecklist,
+    expectedCloseAt: leads.expectedCloseAt,
     rwNumber: leads.rwNumber,
     source: leads.source,
     kind: leads.kind,
@@ -876,6 +879,7 @@ async function getLead(db2, id) {
     dealValue: leads.dealValue,
     commissionValue: leads.commissionValue,
     dealChecklist: leads.dealChecklist,
+    expectedCloseAt: leads.expectedCloseAt,
     rwNumber: leads.rwNumber,
     source: leads.source,
     kind: leads.kind,
@@ -1057,6 +1061,10 @@ async function updateLead(db2, id, patch) {
   if (!lead) return null;
   const set = { updatedAt: /* @__PURE__ */ new Date() };
   if (patch.status) set.status = patch.status;
+  if (patch.expectedCloseAt !== void 0) {
+    const d = patch.expectedCloseAt ? new Date(patch.expectedCloseAt) : null;
+    set.expectedCloseAt = d && !Number.isNaN(d.getTime()) ? d : null;
+  }
   if (typeof patch.lostReason === "string") set.lostReason = patch.lostReason.trim() || null;
   if (patch.dealValue !== void 0) {
     const v = patch.dealValue === null ? null : Number(patch.dealValue);

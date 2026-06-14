@@ -387,6 +387,7 @@ export const leads = pgTable(
     dealValue: doublePrecision("deal_value"), // expected deal size, THB — pipeline money on the dashboard
     commissionValue: doublePrecision("commission_value"), // actual commission, THB — deals ledger (co-agency/referral splits make it ≠ formula)
     dealChecklist: jsonb("deal_checklist").$type<Record<string, string>>(), // transaction steps: stepKey → ISO done-at; absent = not done
+    expectedCloseAt: timestamp("expected_close_at", { withTimezone: true }), // forecasted close date — monthly revenue forecast
     amoLeadId: bigint("amo_lead_id", { mode: "number" }).unique(), // migration traceability
     rwNumber: text("rw_number"), // object the inquiry is about, if any
     source: text("source"), // "object" | "contact"

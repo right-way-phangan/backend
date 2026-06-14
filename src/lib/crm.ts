@@ -203,6 +203,7 @@ export async function listLeads(db: AnyPgDatabase, limit = 500) {
       dealValue: leads.dealValue,
       commissionValue: leads.commissionValue,
       dealChecklist: leads.dealChecklist,
+      expectedCloseAt: leads.expectedCloseAt,
       rwNumber: leads.rwNumber,
       source: leads.source,
       kind: leads.kind,
@@ -283,6 +284,7 @@ export async function getLead(db: AnyPgDatabase, id: number) {
       dealValue: leads.dealValue,
       commissionValue: leads.commissionValue,
       dealChecklist: leads.dealChecklist,
+      expectedCloseAt: leads.expectedCloseAt,
       rwNumber: leads.rwNumber,
       source: leads.source,
       kind: leads.kind,
@@ -603,6 +605,7 @@ export async function updateLead(
     lostReason?: string;
     dealValue?: number | null;
     commissionValue?: number | null;
+    expectedCloseAt?: string | null;
     tags?: string[];
   },
 ): Promise<{ id: number } | null> {
@@ -610,6 +613,10 @@ export async function updateLead(
   if (!lead) return null;
   const set: Record<string, unknown> = { updatedAt: new Date() };
   if (patch.status) set.status = patch.status;
+  if (patch.expectedCloseAt !== undefined) {
+    const d = patch.expectedCloseAt ? new Date(patch.expectedCloseAt) : null;
+    set.expectedCloseAt = d && !Number.isNaN(d.getTime()) ? d : null;
+  }
   if (typeof patch.lostReason === "string") set.lostReason = patch.lostReason.trim() || null;
   if (patch.dealValue !== undefined) {
     const v = patch.dealValue === null ? null : Number(patch.dealValue);
