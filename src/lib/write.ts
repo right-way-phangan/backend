@@ -421,7 +421,7 @@ export async function addObjectPhotos(
 /** Whitelisted scalar columns the PATCH endpoint may set (bot /edit, CRM UI). */
 const PATCHABLE = new Set<keyof ObjectInsert>([
   "status", "priceThb", "pricePerRai", "rentPerRaiMonth", "leaseTermYears",
-  "district", "documentType", "tenure", "descriptionRaw", "locationUrl",
+  "district", "documentType", "tenure", "descriptionRaw", "areaNote", "locationUrl",
   "developer", "completion", "unitsAvailable", "titleEn", "driveFolder",
   // bot /edit fields
   "roadType", "zone", "waterType", "internetType", "terrain",
