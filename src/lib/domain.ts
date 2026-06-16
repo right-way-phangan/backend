@@ -104,6 +104,10 @@ export interface DocRow {
 /** null → undefined, so JSON output matches the site's `?: T` optional fields. */
 const u = <T>(v: T | null | undefined): T | undefined => (v == null ? undefined : v);
 
+/** Date → Unix-seconds string, matching the `dateAdded` storage convention. */
+const epochSecs = (d: Date | string | null | undefined): string | undefined =>
+  d ? String(Math.floor(new Date(d).getTime() / 1000)) : undefined;
+
 export function toDomain(
   row: ObjectRow,
   photos: PhotoRow[],
@@ -175,7 +179,10 @@ export function toDomain(
     buildingRules: u(row.buildingRules),
     reasonForSelling: u(row.reasonForSelling),
     timeOnMarketMonths: u(row.timeOnMarketMonths),
-    dateAdded: u(row.dateAdded),
+    // `date_added` is legacy amoCRM text; for own-DB rows it's redundant with
+    // `created_at`. Fall back so the field is never empty (the gap that broke
+    // prerender/sitemap and the "New" badge), in the same Unix-seconds format.
+    dateAdded: u(row.dateAdded)?.trim() || epochSecs(row.createdAt),
     ddStatus: u(row.ddStatus),
     ddDate: u(row.ddDate),
     ddLawyer: u(row.ddLawyer),
