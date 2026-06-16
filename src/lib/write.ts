@@ -423,6 +423,8 @@ const PATCHABLE = new Set<keyof ObjectInsert>([
   "status", "priceThb", "pricePerRai", "rentPerRaiMonth", "leaseTermYears",
   "district", "documentType", "tenure", "descriptionRaw", "areaNote", "locationUrl",
   "developer", "completion", "unitsAvailable", "titleEn", "driveFolder",
+  // площадь — для дозаполнения каталога (детектор полноты /admin/valuation)
+  "areaRai", "areaSqm",
   // bot /edit fields
   "roadType", "zone", "waterType", "internetType", "terrain",
   "bedrooms", "bathrooms", "buildYear", "condition",
