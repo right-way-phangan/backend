@@ -38,6 +38,7 @@ import {
   listFactorOverrides, setFactorOverrides, listComps, addComp, updateComp, deleteComp,
   logValuation, listValuations, ValuationInputError,
 } from "../lib/valuation";
+import { checkRateLimit } from "../lib/ratelimit";
 
 const API_TOKEN = process.env.API_TOKEN;
 const ON_VERCEL = !!process.env.VERCEL;
@@ -65,7 +66,17 @@ export { driver };
 export const app = new Hono();
 
 // CORS for the Next site. Bearer-token gate when API_TOKEN is set.
-app.use("/*", cors());
+// Origin allow-list (был открытый wildcard `cors()`). Браузер ходит к API
+// только через Next-прокси, поэтому ограничение origin ничего не ломает, но
+// закрывает прямые кросс-origin запросы из чужих вкладок. Расширяется через
+// CORS_ORIGINS (через запятую) — напр. www / vercel-preview.
+const CORS_ORIGINS = (
+  process.env.CORS_ORIGINS ?? "https://rightwaygroup.co,https://www.rightwaygroup.co"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+app.use("/*", cors({ origin: CORS_ORIGINS }));
 if (API_TOKEN) {
   app.use("/*", async (c, next) => {
     // /health is public; the Telegram webhook authenticates via its own secret
@@ -252,6 +263,29 @@ app.post("/track/referral", async (c) => {
 /** Referral sources by visit counts (7d/30d) — AI/search/social breakdown. */
 app.get("/referrals/summary", async (c) => {
   return c.json(await referralsSummary(db));
+});
+
+/**
+ * Rate-limit check (Bearer-gated like everything else). The Next site calls
+ * this from server actions before the inquiry form hits amoCRM and before
+ * /admin login verifies a password. Counts one hit against `key` and reports
+ * whether it is still under `limit` per `windowSec`. Storage = Postgres.
+ */
+app.post("/ratelimit", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as {
+    key?: unknown;
+    limit?: unknown;
+    windowSec?: unknown;
+  };
+  const { key, limit, windowSec } = body;
+  if (
+    typeof key !== "string" || !key ||
+    typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0 ||
+    typeof windowSec !== "number" || !Number.isFinite(windowSec) || windowSec <= 0
+  ) {
+    return c.json({ error: "bad request" }, 400);
+  }
+  return c.json(await checkRateLimit(db, key.slice(0, 200), limit, windowSec));
 });
 
 // ---- Demand intelligence (search/filter signals) ----

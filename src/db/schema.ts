@@ -619,3 +619,22 @@ export const valuations = pgTable(
 );
 
 export type ValuationRow = typeof valuations.$inferSelect;
+
+/**
+ * Fixed-window rate limiting. Serverless (Vercel) has no shared memory between
+ * instances, so the counter lives in Postgres — no new paid service (Vercel
+ * KV/Upstash), reusing the DB we already run. One row per (key, window_start);
+ * an atomic upsert increments the count. Old windows are swept opportunistically
+ * (see lib/ratelimit). Used to throttle the public inquiry form and /admin login.
+ */
+export const rateLimits = pgTable(
+  "rate_limits",
+  {
+    key: text("key").notNull(), // напр. "login:1.2.3.4" / "inquiry:1.2.3.4"
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.key, t.windowStart] }),
+  }),
+);

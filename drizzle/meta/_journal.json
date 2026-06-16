@@ -120,6 +120,13 @@
       "when": 1781374195632,
       "tag": "0016_wandering_wolf_cub",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1781597091950,
+      "tag": "0017_minor_unus",
+      "breakpoints": true
     }
   ]
 }
