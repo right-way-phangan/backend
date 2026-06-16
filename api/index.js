@@ -9,6 +9,7 @@ import { handle } from "hono/vercel";
 
 // src/api/app.ts
 import "dotenv/config";
+import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
@@ -35,6 +36,7 @@ __export(schema_exports, {
   pipelines: () => pipelines,
   processedUpdates: () => processedUpdates,
   projectUnits: () => projectUnits,
+  rateLimits: () => rateLimits,
   referralsDaily: () => referralsDaily,
   searchEvents: () => searchEvents,
   stages: () => stages,
@@ -503,6 +505,18 @@ var valuations = pgTable(
   },
   (t) => ({
     rwIdx: index("valuations_rw_idx").on(t.rwNumber)
+  })
+);
+var rateLimits = pgTable(
+  "rate_limits",
+  {
+    key: text("key").notNull(),
+    // напр. "login:1.2.3.4" / "inquiry:1.2.3.4"
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    count: integer("count").notNull().default(0)
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.key, t.windowStart] })
   })
 );
 
@@ -1681,6 +1695,9 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "unitsAvailable",
   "titleEn",
   "driveFolder",
+  // площадь — для дозаполнения каталога (детектор полноты /admin/valuation)
+  "areaRai",
+  "areaSqm",
   // bot /edit fields
   "roadType",
   "zone",
@@ -2321,6 +2338,30 @@ async function listValuations(db2, limit = 20) {
   return db2.select().from(valuations).orderBy(desc3(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
 }
 
+// src/lib/ratelimit.ts
+import { sql as sql6 } from "drizzle-orm";
+import { lt } from "drizzle-orm";
+async function checkRateLimit(db2, key, limit, windowSec) {
+  const now = Date.now();
+  const windowMs = windowSec * 1e3;
+  const windowStart = new Date(Math.floor(now / windowMs) * windowMs);
+  const [row] = await db2.insert(rateLimits).values({ key, windowStart, count: 1 }).onConflictDoUpdate({
+    target: [rateLimits.key, rateLimits.windowStart],
+    set: { count: sql6`${rateLimits.count} + 1` }
+  }).returning({ count: rateLimits.count });
+  const count = row?.count ?? 1;
+  if (Math.random() < 0.01) {
+    const cutoff = new Date(now - 24 * 60 * 60 * 1e3);
+    db2.delete(rateLimits).where(lt(rateLimits.windowStart, cutoff)).catch(() => {
+    });
+  }
+  return {
+    allowed: count <= limit,
+    count,
+    resetAt: new Date(windowStart.getTime() + windowMs).toISOString()
+  };
+}
+
 // src/api/app.ts
 var API_TOKEN = process.env.API_TOKEN;
 var ON_VERCEL = !!process.env.VERCEL;
@@ -2337,11 +2378,17 @@ if (!ON_VERCEL) {
   seedCrm(db).catch((e) => console.warn("[crm seed] skipped:", e.message));
 }
 var app = new Hono();
-app.use("/*", cors());
+function safeEqual(got, want) {
+  const a = Buffer.from(got ?? "");
+  const b = Buffer.from(want);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+var CORS_ORIGINS = (process.env.CORS_ORIGINS ?? "https://rightwaygroup.co,https://www.rightwaygroup.co").split(",").map((s) => s.trim()).filter(Boolean);
+app.use("/*", cors({ origin: CORS_ORIGINS }));
 if (API_TOKEN) {
   app.use("/*", async (c, next) => {
     if (c.req.path === "/health" || c.req.path.startsWith("/telegram/")) return next();
-    if (c.req.header("authorization") !== `Bearer ${API_TOKEN}`) {
+    if (!safeEqual(c.req.header("authorization"), `Bearer ${API_TOKEN}`)) {
       return c.json({ error: "unauthorized" }, 401);
     }
     return next();
@@ -2350,7 +2397,7 @@ if (API_TOKEN) {
 app.get("/health", (c) => c.json({ ok: true, driver }));
 app.post("/telegram/contact", async (c) => {
   if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
-  if (CONTACT_WEBHOOK_SECRET && c.req.header("x-telegram-bot-api-secret-token") !== CONTACT_WEBHOOK_SECRET) {
+  if (CONTACT_WEBHOOK_SECRET && !safeEqual(c.req.header("x-telegram-bot-api-secret-token"), CONTACT_WEBHOOK_SECRET)) {
     return c.json({ error: "forbidden" }, 403);
   }
   try {
@@ -2362,7 +2409,7 @@ app.post("/telegram/contact", async (c) => {
   return c.json({ ok: true });
 });
 app.get("/telegram/selfcheck", async (c) => {
-  if (CRON_SECRET && c.req.header("authorization") !== `Bearer ${CRON_SECRET}`) {
+  if (CRON_SECRET && !safeEqual(c.req.header("authorization"), `Bearer ${CRON_SECRET}`)) {
     return c.json({ error: "unauthorized" }, 401);
   }
   if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
@@ -2470,6 +2517,14 @@ app.post("/track/referral", async (c) => {
 });
 app.get("/referrals/summary", async (c) => {
   return c.json(await referralsSummary(db));
+});
+app.post("/ratelimit", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const { key, limit, windowSec } = body;
+  if (typeof key !== "string" || !key || typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0 || typeof windowSec !== "number" || !Number.isFinite(windowSec) || windowSec <= 0) {
+    return c.json({ error: "bad request" }, 400);
+  }
+  return c.json(await checkRateLimit(db, key.slice(0, 200), limit, windowSec));
 });
 app.post("/track/search", async (c) => {
   try {

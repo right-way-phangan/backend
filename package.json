@@ -33,8 +33,11 @@
   "devDependencies": {
     "@types/node": "^22.19.20",
     "drizzle-kit": "^0.31.10",
-    "esbuild": "^0.28.0",
+    "esbuild": "^0.28.1",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1"
   }
 }

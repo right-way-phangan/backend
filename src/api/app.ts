@@ -12,6 +12,7 @@
  * `Authorization: Bearer <API_TOKEN>` (the API is internet-facing). Unset → open.
  */
 import "dotenv/config";
+import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createDb } from "../db/connect";
@@ -65,6 +66,13 @@ if (!ON_VERCEL) {
 export { driver };
 export const app = new Hono();
 
+/** Constant-time compare so a wrong token can't be narrowed by response timing. */
+function safeEqual(got: string | undefined, want: string): boolean {
+  const a = Buffer.from(got ?? "");
+  const b = Buffer.from(want);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 // CORS for the Next site. Bearer-token gate when API_TOKEN is set.
 // Origin allow-list (был открытый wildcard `cors()`). Браузер ходит к API
 // только через Next-прокси, поэтому ограничение origin ничего не ломает, но
@@ -82,7 +90,7 @@ if (API_TOKEN) {
     // /health is public; the Telegram webhook authenticates via its own secret
     // header (Telegram can't send a Bearer token), validated in the route below.
     if (c.req.path === "/health" || c.req.path.startsWith("/telegram/")) return next();
-    if (c.req.header("authorization") !== `Bearer ${API_TOKEN}`) {
+    if (!safeEqual(c.req.header("authorization"), `Bearer ${API_TOKEN}`)) {
       return c.json({ error: "unauthorized" }, 401);
     }
     return next();
@@ -101,7 +109,7 @@ app.post("/telegram/contact", async (c) => {
   if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
   if (
     CONTACT_WEBHOOK_SECRET &&
-    c.req.header("x-telegram-bot-api-secret-token") !== CONTACT_WEBHOOK_SECRET
+    !safeEqual(c.req.header("x-telegram-bot-api-secret-token"), CONTACT_WEBHOOK_SECRET)
   ) {
     return c.json({ error: "forbidden" }, 403);
   }
@@ -121,7 +129,7 @@ app.post("/telegram/contact", async (c) => {
  * so it can't be triggered publicly.
  */
 app.get("/telegram/selfcheck", async (c) => {
-  if (CRON_SECRET && c.req.header("authorization") !== `Bearer ${CRON_SECRET}`) {
+  if (CRON_SECRET && !safeEqual(c.req.header("authorization"), `Bearer ${CRON_SECRET}`)) {
     return c.json({ error: "unauthorized" }, 401);
   }
   if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
