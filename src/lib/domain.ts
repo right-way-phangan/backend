@@ -42,6 +42,7 @@ export interface RealEstateObject {
   priceThb?: number;
   pricePerRai?: number;
   rentPerRaiMonth?: number;
+  rentPerMonth?: number;
   leaseTermYears?: number;
   leaseEscPercent?: number;
   leaseEscPeriodYears?: number;
@@ -154,6 +155,7 @@ export function toDomain(
     priceThb: u(row.priceThb),
     pricePerRai: u(row.pricePerRai),
     rentPerRaiMonth: u(row.rentPerRaiMonth),
+    rentPerMonth: u(row.rentPerMonth),
     leaseTermYears: u(row.leaseTermYears),
     leaseEscPercent: u(row.leaseEscPercent),
     leaseEscPeriodYears: u(row.leaseEscPeriodYears),

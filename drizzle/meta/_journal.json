@@ -141,6 +141,13 @@
       "when": 1781689335913,
       "tag": "0019_serious_rockslide",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1781696850371,
+      "tag": "0020_huge_ulik",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "objects" ADD COLUMN "rent_per_month" double precision;

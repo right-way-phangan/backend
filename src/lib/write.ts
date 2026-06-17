@@ -81,6 +81,7 @@ export interface NewObjectInput {
   area?: string;
   pricePerRai?: number;
   rentPerRaiMonth?: number;
+  rentPerMonth?: number;
   leaseTermYears?: number;
   leaseEscalation?: string;
   leaseAddTerms?: string;
@@ -380,6 +381,7 @@ function buildRow(input: NewObjectInput, rwNumber: string, title: string): Objec
     priceThb: input.priceThb,
     pricePerRai: input.pricePerRai,
     rentPerRaiMonth: input.rentPerRaiMonth,
+    rentPerMonth: input.rentPerMonth,
     leaseTermYears: input.leaseTermYears,
     leaseEscPercent: esc.percent,
     leaseEscPeriodYears: esc.periodYears,
@@ -533,7 +535,7 @@ export async function addObjectPhotos(
 
 /** Whitelisted scalar columns the PATCH endpoint may set (bot /edit, CRM UI). */
 const PATCHABLE = new Set<keyof ObjectInsert>([
-  "status", "priceThb", "pricePerRai", "rentPerRaiMonth", "leaseTermYears",
+  "status", "priceThb", "pricePerRai", "rentPerRaiMonth", "rentPerMonth", "leaseTermYears",
   "district", "documentType", "tenure", "descriptionRaw", "areaNote", "locationUrl",
   "developer", "completion", "unitsAvailable", "titleEn", "driveFolder",
   // площадь — для дозаполнения каталога (детектор полноты /admin/valuation)

@@ -64,6 +64,9 @@ export const objects = pgTable(
 
     // Pricing (leasehold)
     rentPerRaiMonth: doublePrecision("rent_per_rai_month"),
+    // Whole-unit monthly rent for buildings (villa/house/apartment), THB/month —
+    // the Rent view's price axis for non-land. Land uses rentPerRaiMonth instead.
+    rentPerMonth: doublePrecision("rent_per_month"),
     leaseTermYears: doublePrecision("lease_term_years"),
     leaseEscPercent: doublePrecision("lease_esc_percent"),
     leaseEscPeriodYears: doublePrecision("lease_esc_period_years"),
