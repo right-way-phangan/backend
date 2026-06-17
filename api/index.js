@@ -9,6 +9,7 @@ import { handle } from "hono/vercel";
 
 // src/api/app.ts
 import "dotenv/config";
+import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
@@ -26,6 +27,7 @@ __export(schema_exports, {
   leadNotes: () => leadNotes,
   leadTasks: () => leadTasks,
   leads: () => leads,
+  objectContacts: () => objectContacts,
   objectDocs: () => objectDocs,
   objectEventsDaily: () => objectEventsDaily,
   objectPhotos: () => objectPhotos,
@@ -35,6 +37,7 @@ __export(schema_exports, {
   pipelines: () => pipelines,
   processedUpdates: () => processedUpdates,
   projectUnits: () => projectUnits,
+  rateLimits: () => rateLimits,
   referralsDaily: () => referralsDaily,
   searchEvents: () => searchEvents,
   stages: () => stages,
@@ -159,6 +162,9 @@ var objects = pgTable(
     locationUrl: text("location_url"),
     lat: doublePrecision("lat"),
     lng: doublePrecision("lng"),
+    // Pin is an eyeball estimate (area-level from a Maps screenshot), not a
+    // surveyed/resolved point — UI badges it and it's safe to overwrite later.
+    coordsApprox: boolean("coords_approx").notNull().default(false),
     // Traced plot contour, [lat, lng] ring (admin draws over cadastral tiles).
     plotPolygon: jsonb("plot_polygon").$type(),
     siteUrl: text("site_url"),
@@ -198,6 +204,26 @@ var objectDocs = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
   },
   (t) => ({ objIdx: index("object_docs_object_idx").on(t.objectId) })
+);
+var objectContacts = pgTable(
+  "object_contacts",
+  {
+    id: serial("id").primaryKey(),
+    objectId: integer("object_id").notNull().references(() => objects.id, { onDelete: "cascade" }),
+    role: text("role").notNull().default("owner"),
+    // owner | broker | caretaker | lawyer | other
+    name: text("name"),
+    phone: text("phone"),
+    line: text("line"),
+    whatsapp: text("whatsapp"),
+    telegram: text("telegram"),
+    note: text("note"),
+    isPrimary: boolean("is_primary").notNull().default(false),
+    sort: integer("sort").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({ objIdx: index("object_contacts_object_idx").on(t.objectId) })
 );
 var projectUnits = pgTable(
   "project_units",
@@ -505,6 +531,18 @@ var valuations = pgTable(
     rwIdx: index("valuations_rw_idx").on(t.rwNumber)
   })
 );
+var rateLimits = pgTable(
+  "rate_limits",
+  {
+    key: text("key").notNull(),
+    // напр. "login:1.2.3.4" / "inquiry:1.2.3.4"
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    count: integer("count").notNull().default(0)
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.key, t.windowStart] })
+  })
+);
 
 // src/db/connect.ts
 async function createDb() {
@@ -550,7 +588,8 @@ import { eq } from "drizzle-orm";
 
 // src/lib/domain.ts
 var u = (v) => v == null ? void 0 : v;
-function toDomain(row, photos, docs) {
+var epochSecs = (d) => d ? String(Math.floor(new Date(d).getTime() / 1e3)) : void 0;
+function toDomain(row, photos, docs, contacts2 = []) {
   const gallery = [...photos].sort((a, b) => a.sort - b.sort).map((p) => p.url);
   const cover = photos.find((p) => p.isCover)?.url ?? gallery[0];
   return {
@@ -611,10 +650,14 @@ function toDomain(row, photos, docs) {
     timeline: u(row.timeline) ?? void 0,
     team: u(row.team) ?? void 0,
     ownerName: u(row.ownerName),
+    contacts: contacts2.length ? contacts2 : void 0,
     buildingRules: u(row.buildingRules),
     reasonForSelling: u(row.reasonForSelling),
     timeOnMarketMonths: u(row.timeOnMarketMonths),
-    dateAdded: u(row.dateAdded),
+    // `date_added` is legacy amoCRM text; for own-DB rows it's redundant with
+    // `created_at`. Fall back so the field is never empty (the gap that broke
+    // prerender/sitemap and the "New" badge), in the same Unix-seconds format.
+    dateAdded: u(row.dateAdded)?.trim() || epochSecs(row.createdAt),
     ddStatus: u(row.ddStatus),
     ddDate: u(row.ddDate),
     ddLawyer: u(row.ddLawyer),
@@ -627,6 +670,7 @@ function toDomain(row, photos, docs) {
     locationUrl: u(row.locationUrl),
     lat: u(row.lat),
     lng: u(row.lng),
+    coordsApprox: row.coordsApprox || void 0,
     plotPolygon: u(row.plotPolygon) ?? void 0,
     siteUrl: u(row.siteUrl),
     coverImage: cover,
@@ -644,10 +688,11 @@ function sortByRecentAndPremium(a, b) {
 
 // src/lib/queries.ts
 async function assembleAll(db2) {
-  const [objs, phs, dcs] = await Promise.all([
+  const [objs, phs, dcs, cts] = await Promise.all([
     db2.select().from(objects),
     db2.select().from(objectPhotos),
-    db2.select().from(objectDocs)
+    db2.select().from(objectDocs),
+    db2.select().from(objectContacts)
   ]);
   const photosByObj = /* @__PURE__ */ new Map();
   for (const p of phs) {
@@ -661,11 +706,32 @@ async function assembleAll(db2) {
     arr.push(d);
     docsByObj.set(d.objectId, arr);
   }
+  const contactsByObj = /* @__PURE__ */ new Map();
+  for (const c of cts) {
+    const arr = contactsByObj.get(c.objectId) ?? [];
+    arr.push({
+      id: c.id,
+      role: c.role,
+      name: c.name ?? void 0,
+      phone: c.phone ?? void 0,
+      line: c.line ?? void 0,
+      whatsapp: c.whatsapp ?? void 0,
+      telegram: c.telegram ?? void 0,
+      note: c.note ?? void 0,
+      isPrimary: c.isPrimary,
+      sort: c.sort
+    });
+    contactsByObj.set(c.objectId, arr);
+  }
+  for (const arr of contactsByObj.values()) {
+    arr.sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || (a.sort ?? 0) - (b.sort ?? 0));
+  }
   return objs.map(
     (o) => toDomain(
       o,
       (photosByObj.get(o.id) ?? []).map((p) => ({ url: p.url, sort: p.sort, isCover: p.isCover })),
-      (docsByObj.get(o.id) ?? []).map((d) => ({ name: d.name, url: d.url }))
+      (docsByObj.get(o.id) ?? []).map((d) => ({ name: d.name, url: d.url })),
+      contactsByObj.get(o.id) ?? []
     )
   );
 }
@@ -1395,6 +1461,37 @@ async function generateObjectTitle(a) {
 // src/lib/write.ts
 var ObjectInputError = class extends Error {
 };
+var CONTACT_ROLES = /* @__PURE__ */ new Set(["owner", "broker", "caretaker", "lawyer", "other"]);
+function parseOwnerContactText(text2) {
+  const s = (text2 ?? "").trim();
+  if (!s) return null;
+  const phoneMatch = s.match(/\+?\d[\d\s().-]{6,}\d/);
+  const phone = phoneMatch ? phoneMatch[0].trim() : void 0;
+  const name = (phone ? s.replace(phoneMatch[0], "") : s).replace(/[·,|]+/g, " ").replace(/\s{2,}/g, " ").trim();
+  return { role: "owner", name: name || void 0, phone, isPrimary: true };
+}
+function contactRowValues(c, objectId, sort) {
+  const clean2 = (v) => {
+    const t = (v ?? "").trim();
+    return t || null;
+  };
+  const role = c.role && CONTACT_ROLES.has(c.role) ? c.role : "owner";
+  const values = {
+    objectId,
+    role,
+    name: clean2(c.name),
+    phone: clean2(c.phone),
+    line: clean2(c.line),
+    whatsapp: clean2(c.whatsapp),
+    telegram: clean2(c.telegram),
+    note: clean2(c.note),
+    isPrimary: !!c.isPrimary,
+    sort,
+    updatedAt: /* @__PURE__ */ new Date()
+  };
+  const hasContent = values.name || values.phone || values.line || values.whatsapp || values.telegram || values.note;
+  return hasContent ? values : null;
+}
 function rwPrefixForType(type) {
   switch (type) {
     case "Land":
@@ -1498,6 +1595,32 @@ function parseLatLng(url) {
   const lng = Number(m[2]);
   if (lat < 9 || lat > 10.5 || lng < 99 || lng > 101) return {};
   return { lat, lng };
+}
+async function resolveLatLngFromUrl(url) {
+  if (!url) return {};
+  const direct = parseLatLng(url);
+  if (direct.lat != null) return direct;
+  if (!/^https?:\/\//i.test(url)) return {};
+  try {
+    let target = url;
+    for (let i = 0; i < 5; i++) {
+      const res = await fetch(target, {
+        redirect: "manual",
+        headers: { "user-agent": "Mozilla/5.0 (compatible; RightWayBot/1.0)" }
+      });
+      const loc = res.headers.get("location");
+      if (!loc) {
+        const found2 = parseLatLng(res.url);
+        return found2.lat != null ? found2 : {};
+      }
+      const found = parseLatLng(loc);
+      if (found.lat != null) return found;
+      target = new URL(loc, target).href;
+    }
+  } catch (err) {
+    console.error("[resolveLatLngFromUrl]", err.message);
+  }
+  return {};
 }
 function sanitizePolygon(raw) {
   if (!Array.isArray(raw)) return void 0;
@@ -1630,6 +1753,13 @@ async function createObject(db2, input) {
   const rwNumber = input.parentProjectRw?.trim() ? await getNextUnitNumber(db2, input.parentProjectRw) : await getNextRwNumber(db2, input.type);
   const title = input.title?.trim() || await generateObjectTitle(titleAttrsFromInput(input, rwNumber));
   const row = buildRow(input, rwNumber, title);
+  if (row.lat == null && input.locationUrl) {
+    const ll = await resolveLatLngFromUrl(input.locationUrl);
+    if (ll.lat != null) {
+      row.lat = ll.lat;
+      row.lng = ll.lng;
+    }
+  }
   const id = await db2.transaction(async (tx) => {
     const [obj] = await tx.insert(objects).values(row).returning({ id: objects.id });
     if (input.photoUrls?.length) {
@@ -1640,6 +1770,9 @@ async function createObject(db2, input) {
     if (input.docUrls?.length) {
       await tx.insert(objectDocs).values(input.docUrls.map((d) => ({ objectId: obj.id, name: d.name, url: d.url })));
     }
+    const seed2 = input.contacts?.length ? input.contacts : [parseOwnerContactText(input.owner)].filter((c) => c != null);
+    const contactRows = seed2.map((c, i) => contactRowValues(c, obj.id, i)).filter((r) => r != null);
+    if (contactRows.length) await tx.insert(objectContacts).values(contactRows);
     return obj.id;
   });
   const base = process.env.SITE_BASE_URL ?? "";
@@ -1681,6 +1814,9 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "unitsAvailable",
   "titleEn",
   "driveFolder",
+  // площадь — для дозаполнения каталога (детектор полноты /admin/valuation)
+  "areaRai",
+  "areaSqm",
   // bot /edit fields
   "roadType",
   "zone",
@@ -1705,7 +1841,9 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "outreachAttempts",
   "ownerName",
   // traced plot contour (admin map editor); null clears
-  "plotPolygon"
+  "plotPolygon",
+  // eyeball/approx coordinate flag (bulk seed of legacy plots without a survey)
+  "coordsApprox"
 ]);
 async function updateObject(db2, rwNumber, patch) {
   const set = { updatedAt: /* @__PURE__ */ new Date() };
@@ -1717,8 +1855,35 @@ async function updateObject(db2, rwNumber, patch) {
     }
     set[k] = v;
   }
+  if (typeof set.locationUrl === "string" && set.locationUrl) {
+    const ll = await resolveLatLngFromUrl(set.locationUrl);
+    if (ll.lat != null) {
+      set.lat = ll.lat;
+      set.lng = ll.lng;
+    }
+  }
   const [row] = await db2.update(objects).set(set).where(eq4(objects.rwNumber, rwNumber)).returning({ rwNumber: objects.rwNumber });
   return row ?? null;
+}
+async function replaceObjectContacts(db2, rwNumber, contacts2) {
+  const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq4(objects.rwNumber, rwNumber));
+  if (!obj) return null;
+  const rows = (Array.isArray(contacts2) ? contacts2 : []).map((c, i) => contactRowValues(c, obj.id, i)).filter((r) => r != null);
+  if (rows.length && !rows.some((r) => r.isPrimary)) rows[0].isPrimary = true;
+  await db2.transaction(async (tx) => {
+    await tx.delete(objectContacts).where(eq4(objectContacts.objectId, obj.id));
+    if (rows.length) await tx.insert(objectContacts).values(rows);
+  });
+  return rows.map((r) => ({
+    role: r.role,
+    name: r.name ?? void 0,
+    phone: r.phone ?? void 0,
+    line: r.line ?? void 0,
+    whatsapp: r.whatsapp ?? void 0,
+    telegram: r.telegram ?? void 0,
+    note: r.note ?? void 0,
+    isPrimary: r.isPrimary
+  }));
 }
 
 // src/lib/auth.ts
@@ -2321,6 +2486,30 @@ async function listValuations(db2, limit = 20) {
   return db2.select().from(valuations).orderBy(desc3(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
 }
 
+// src/lib/ratelimit.ts
+import { sql as sql6 } from "drizzle-orm";
+import { lt } from "drizzle-orm";
+async function checkRateLimit(db2, key, limit, windowSec) {
+  const now = Date.now();
+  const windowMs = windowSec * 1e3;
+  const windowStart = new Date(Math.floor(now / windowMs) * windowMs);
+  const [row] = await db2.insert(rateLimits).values({ key, windowStart, count: 1 }).onConflictDoUpdate({
+    target: [rateLimits.key, rateLimits.windowStart],
+    set: { count: sql6`${rateLimits.count} + 1` }
+  }).returning({ count: rateLimits.count });
+  const count = row?.count ?? 1;
+  if (Math.random() < 0.01) {
+    const cutoff = new Date(now - 24 * 60 * 60 * 1e3);
+    db2.delete(rateLimits).where(lt(rateLimits.windowStart, cutoff)).catch(() => {
+    });
+  }
+  return {
+    allowed: count <= limit,
+    count,
+    resetAt: new Date(windowStart.getTime() + windowMs).toISOString()
+  };
+}
+
 // src/api/app.ts
 var API_TOKEN = process.env.API_TOKEN;
 var ON_VERCEL = !!process.env.VERCEL;
@@ -2337,11 +2526,17 @@ if (!ON_VERCEL) {
   seedCrm(db).catch((e) => console.warn("[crm seed] skipped:", e.message));
 }
 var app = new Hono();
-app.use("/*", cors());
+function safeEqual(got, want) {
+  const a = Buffer.from(got ?? "");
+  const b = Buffer.from(want);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+var CORS_ORIGINS = (process.env.CORS_ORIGINS ?? "https://rightwaygroup.co,https://www.rightwaygroup.co").split(",").map((s) => s.trim()).filter(Boolean);
+app.use("/*", cors({ origin: CORS_ORIGINS }));
 if (API_TOKEN) {
   app.use("/*", async (c, next) => {
     if (c.req.path === "/health" || c.req.path.startsWith("/telegram/")) return next();
-    if (c.req.header("authorization") !== `Bearer ${API_TOKEN}`) {
+    if (!safeEqual(c.req.header("authorization"), `Bearer ${API_TOKEN}`)) {
       return c.json({ error: "unauthorized" }, 401);
     }
     return next();
@@ -2350,7 +2545,7 @@ if (API_TOKEN) {
 app.get("/health", (c) => c.json({ ok: true, driver }));
 app.post("/telegram/contact", async (c) => {
   if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
-  if (CONTACT_WEBHOOK_SECRET && c.req.header("x-telegram-bot-api-secret-token") !== CONTACT_WEBHOOK_SECRET) {
+  if (CONTACT_WEBHOOK_SECRET && !safeEqual(c.req.header("x-telegram-bot-api-secret-token"), CONTACT_WEBHOOK_SECRET)) {
     return c.json({ error: "forbidden" }, 403);
   }
   try {
@@ -2362,7 +2557,7 @@ app.post("/telegram/contact", async (c) => {
   return c.json({ ok: true });
 });
 app.get("/telegram/selfcheck", async (c) => {
-  if (CRON_SECRET && c.req.header("authorization") !== `Bearer ${CRON_SECRET}`) {
+  if (CRON_SECRET && !safeEqual(c.req.header("authorization"), `Bearer ${CRON_SECRET}`)) {
     return c.json({ error: "unauthorized" }, 401);
   }
   if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
@@ -2428,6 +2623,20 @@ app.post("/objects/:rw/photos", async (c) => {
     return c.json({ error: "add photos failed" }, 500);
   }
 });
+app.put("/objects/:rw/contacts", async (c) => {
+  try {
+    const { contacts: contacts2 } = await c.req.json();
+    const res = await replaceObjectContacts(
+      db,
+      c.req.param("rw"),
+      Array.isArray(contacts2) ? contacts2 : []
+    );
+    return res ? c.json({ contacts: res }) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[PUT /objects/:rw/contacts]", err);
+    return c.json({ error: "save contacts failed" }, 500);
+  }
+});
 app.post("/track/view", async (c) => {
   try {
     const { rw, vid } = await c.req.json();
@@ -2470,6 +2679,14 @@ app.post("/track/referral", async (c) => {
 });
 app.get("/referrals/summary", async (c) => {
   return c.json(await referralsSummary(db));
+});
+app.post("/ratelimit", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const { key, limit, windowSec } = body;
+  if (typeof key !== "string" || !key || typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0 || typeof windowSec !== "number" || !Number.isFinite(windowSec) || windowSec <= 0) {
+    return c.json({ error: "bad request" }, 400);
+  }
+  return c.json(await checkRateLimit(db, key.slice(0, 200), limit, windowSec));
 });
 app.post("/track/search", async (c) => {
   try {

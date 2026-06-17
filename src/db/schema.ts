@@ -141,6 +141,9 @@ export const objects = pgTable(
     locationUrl: text("location_url"),
     lat: doublePrecision("lat"),
     lng: doublePrecision("lng"),
+    // Pin is an eyeball estimate (area-level from a Maps screenshot), not a
+    // surveyed/resolved point — UI badges it and it's safe to overwrite later.
+    coordsApprox: boolean("coords_approx").notNull().default(false),
     // Traced plot contour, [lat, lng] ring (admin draws over cadastral tiles).
     plotPolygon: jsonb("plot_polygon").$type<Array<[number, number]>>(),
     siteUrl: text("site_url"),

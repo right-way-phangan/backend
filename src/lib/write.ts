@@ -254,6 +254,42 @@ function parseLatLng(url?: string): { lat?: number; lng?: number } {
 }
 
 /**
+ * Resolve coordinates from a Google Maps URL. Full URLs (…?q=lat,lng / @lat,lng)
+ * are parsed directly; SHORT links (maps.app.goo.gl, goo.gl/maps, g.co) hide the
+ * coordinates behind HTTP redirects, so we follow up to 5 hops and read the
+ * coordinates out of each Location header (the first hop already carries ?q=).
+ * Network failures degrade to {} — the caller keeps locationUrl without coords.
+ */
+export async function resolveLatLngFromUrl(
+  url?: string,
+): Promise<{ lat?: number; lng?: number }> {
+  if (!url) return {};
+  const direct = parseLatLng(url);
+  if (direct.lat != null) return direct;
+  if (!/^https?:\/\//i.test(url)) return {};
+  try {
+    let target = url;
+    for (let i = 0; i < 5; i++) {
+      const res = await fetch(target, {
+        redirect: "manual",
+        headers: { "user-agent": "Mozilla/5.0 (compatible; RightWayBot/1.0)" },
+      });
+      const loc = res.headers.get("location");
+      if (!loc) {
+        const found = parseLatLng(res.url);
+        return found.lat != null ? found : {};
+      }
+      const found = parseLatLng(loc);
+      if (found.lat != null) return found;
+      target = new URL(loc, target).href;
+    }
+  } catch (err) {
+    console.error("[resolveLatLngFromUrl]", (err as Error).message);
+  }
+  return {};
+}
+
+/**
  * Traced plot contour: keep only valid [lat, lng] pairs inside the Phangan
  * bounding box (same as parseLatLng); a ring needs ≥3 vertices to be a shape.
  */
@@ -417,6 +453,15 @@ export async function createObject(
     input.title?.trim() || (await generateObjectTitle(titleAttrsFromInput(input, rwNumber)));
 
   const row = buildRow(input, rwNumber, title);
+  // buildRow's parseLatLng only catches URLs that already carry coords; resolve
+  // short maps links (maps.app.goo.gl) via redirect so a pasted link sets the pin.
+  if (row.lat == null && input.locationUrl) {
+    const ll = await resolveLatLngFromUrl(input.locationUrl);
+    if (ll.lat != null) {
+      row.lat = ll.lat;
+      row.lng = ll.lng;
+    }
+  }
 
   const id = await db.transaction(async (tx: AnyPgDatabase) => {
     const [obj] = await tx.insert(objects).values(row).returning({ id: objects.id });
@@ -503,6 +548,8 @@ const PATCHABLE = new Set<keyof ObjectInsert>([
   "outreachStatus", "outreachNote", "outreachDate", "outreachAttempts", "ownerName",
   // traced plot contour (admin map editor); null clears
   "plotPolygon",
+  // eyeball/approx coordinate flag (bulk seed of legacy plots without a survey)
+  "coordsApprox",
 ]);
 
 /** Update whitelisted columns of an object by RW number. */
@@ -519,6 +566,15 @@ export async function updateObject(
       continue;
     }
     set[k] = v;
+  }
+  // Patching the Google Maps URL re-derives the pin — incl. short maps.app.goo.gl
+  // links (createObject already does this; updateObject must too for inline edits).
+  if (typeof set.locationUrl === "string" && set.locationUrl) {
+    const ll = await resolveLatLngFromUrl(set.locationUrl);
+    if (ll.lat != null) {
+      set.lat = ll.lat;
+      set.lng = ll.lng;
+    }
   }
   const [row] = await db
     .update(objects)
