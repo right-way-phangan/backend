@@ -90,6 +90,9 @@ var objects = pgTable(
     pricePerRai: doublePrecision("price_per_rai"),
     // Pricing (leasehold)
     rentPerRaiMonth: doublePrecision("rent_per_rai_month"),
+    // Whole-unit monthly rent for buildings (villa/house/apartment), THB/month —
+    // the Rent view's price axis for non-land. Land uses rentPerRaiMonth instead.
+    rentPerMonth: doublePrecision("rent_per_month"),
     leaseTermYears: doublePrecision("lease_term_years"),
     leaseEscPercent: doublePrecision("lease_esc_percent"),
     leaseEscPeriodYears: doublePrecision("lease_esc_period_years"),
@@ -611,6 +614,7 @@ function toDomain(row, photos, docs, contacts2 = []) {
     priceThb: u(row.priceThb),
     pricePerRai: u(row.pricePerRai),
     rentPerRaiMonth: u(row.rentPerRaiMonth),
+    rentPerMonth: u(row.rentPerMonth),
     leaseTermYears: u(row.leaseTermYears),
     leaseEscPercent: u(row.leaseEscPercent),
     leaseEscPeriodYears: u(row.leaseEscPeriodYears),
@@ -1705,6 +1709,7 @@ function buildRow(input, rwNumber, title) {
     priceThb: input.priceThb,
     pricePerRai: input.pricePerRai,
     rentPerRaiMonth: input.rentPerRaiMonth,
+    rentPerMonth: input.rentPerMonth,
     leaseTermYears: input.leaseTermYears,
     leaseEscPercent: esc.percent,
     leaseEscPeriodYears: esc.periodYears,
@@ -1808,6 +1813,7 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "priceThb",
   "pricePerRai",
   "rentPerRaiMonth",
+  "rentPerMonth",
   "leaseTermYears",
   "district",
   "documentType",
