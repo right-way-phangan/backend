@@ -480,6 +480,8 @@ const PATCHABLE = new Set<keyof ObjectInsert>([
   "outreachStatus", "outreachNote", "outreachDate", "outreachAttempts", "ownerName",
   // traced plot contour (admin map editor); null clears
   "plotPolygon",
+  // eyeball/approx coordinate flag (bulk seed of legacy plots without a survey)
+  "coordsApprox",
 ]);
 
 /** Update whitelisted columns of an object by RW number. */
