@@ -1513,6 +1513,32 @@ function parseLatLng(url) {
   if (lat < 9 || lat > 10.5 || lng < 99 || lng > 101) return {};
   return { lat, lng };
 }
+async function resolveLatLngFromUrl(url) {
+  if (!url) return {};
+  const direct = parseLatLng(url);
+  if (direct.lat != null) return direct;
+  if (!/^https?:\/\//i.test(url)) return {};
+  try {
+    let target = url;
+    for (let i = 0; i < 5; i++) {
+      const res = await fetch(target, {
+        redirect: "manual",
+        headers: { "user-agent": "Mozilla/5.0 (compatible; RightWayBot/1.0)" }
+      });
+      const loc = res.headers.get("location");
+      if (!loc) {
+        const found2 = parseLatLng(res.url);
+        return found2.lat != null ? found2 : {};
+      }
+      const found = parseLatLng(loc);
+      if (found.lat != null) return found;
+      target = new URL(loc, target).href;
+    }
+  } catch (err) {
+    console.error("[resolveLatLngFromUrl]", err.message);
+  }
+  return {};
+}
 function sanitizePolygon(raw) {
   if (!Array.isArray(raw)) return void 0;
   const pts = [];
@@ -1644,6 +1670,13 @@ async function createObject(db2, input) {
   const rwNumber = input.parentProjectRw?.trim() ? await getNextUnitNumber(db2, input.parentProjectRw) : await getNextRwNumber(db2, input.type);
   const title = input.title?.trim() || await generateObjectTitle(titleAttrsFromInput(input, rwNumber));
   const row = buildRow(input, rwNumber, title);
+  if (row.lat == null && input.locationUrl) {
+    const ll = await resolveLatLngFromUrl(input.locationUrl);
+    if (ll.lat != null) {
+      row.lat = ll.lat;
+      row.lng = ll.lng;
+    }
+  }
   const id = await db2.transaction(async (tx) => {
     const [obj] = await tx.insert(objects).values(row).returning({ id: objects.id });
     if (input.photoUrls?.length) {
@@ -1733,6 +1766,13 @@ async function updateObject(db2, rwNumber, patch) {
       continue;
     }
     set[k] = v;
+  }
+  if (typeof set.locationUrl === "string" && set.locationUrl) {
+    const ll = await resolveLatLngFromUrl(set.locationUrl);
+    if (ll.lat != null) {
+      set.lat = ll.lat;
+      set.lng = ll.lng;
+    }
   }
   const [row] = await db2.update(objects).set(set).where(eq4(objects.rwNumber, rwNumber)).returning({ rwNumber: objects.rwNumber });
   return row ?? null;
