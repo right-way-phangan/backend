@@ -83,6 +83,7 @@ export interface RealEstateObject {
   locationUrl?: string;
   lat?: number;
   lng?: number;
+  coordsApprox?: boolean;
   plotPolygon?: Array<[number, number]>;
   siteUrl?: string;
   coverImage?: string;
@@ -188,6 +189,7 @@ export function toDomain(
     locationUrl: u(row.locationUrl),
     lat: u(row.lat),
     lng: u(row.lng),
+    coordsApprox: row.coordsApprox || undefined,
     plotPolygon: u(row.plotPolygon) ?? undefined,
     siteUrl: u(row.siteUrl),
     coverImage: cover,

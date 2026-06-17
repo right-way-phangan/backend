@@ -161,6 +161,9 @@ var objects = pgTable(
     locationUrl: text("location_url"),
     lat: doublePrecision("lat"),
     lng: doublePrecision("lng"),
+    // Pin is an eyeball estimate (area-level from a Maps screenshot), not a
+    // surveyed/resolved point — UI badges it and it's safe to overwrite later.
+    coordsApprox: boolean("coords_approx").notNull().default(false),
     // Traced plot contour, [lat, lng] ring (admin draws over cadastral tiles).
     plotPolygon: jsonb("plot_polygon").$type(),
     siteUrl: text("site_url"),
@@ -641,6 +644,7 @@ function toDomain(row, photos, docs) {
     locationUrl: u(row.locationUrl),
     lat: u(row.lat),
     lng: u(row.lng),
+    coordsApprox: row.coordsApprox || void 0,
     plotPolygon: u(row.plotPolygon) ?? void 0,
     siteUrl: u(row.siteUrl),
     coverImage: cover,
@@ -1755,7 +1759,9 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "outreachAttempts",
   "ownerName",
   // traced plot contour (admin map editor); null clears
-  "plotPolygon"
+  "plotPolygon",
+  // eyeball/approx coordinate flag (bulk seed of legacy plots without a survey)
+  "coordsApprox"
 ]);
 async function updateObject(db2, rwNumber, patch) {
   const set = { updatedAt: /* @__PURE__ */ new Date() };

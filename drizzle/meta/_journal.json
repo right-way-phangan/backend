@@ -127,6 +127,13 @@
       "when": 1781597091950,
       "tag": "0017_minor_unus",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1781683677935,
+      "tag": "0018_coords_approx",
+      "breakpoints": true
     }
   ]
 }

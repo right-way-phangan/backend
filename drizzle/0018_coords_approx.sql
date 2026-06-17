@@ -1,0 +1,1 @@
+ALTER TABLE "objects" ADD COLUMN "coords_approx" boolean DEFAULT false NOT NULL;
