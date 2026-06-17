@@ -13,3 +13,6 @@ dist/
 # build (Vercel classifies this layout as static and skips it). `npm run build`
 # regenerates it; rebuild + commit when src/api changes.
 .pgdata-smoke/
+
+# worktree symlink, never commit
+/node_modules

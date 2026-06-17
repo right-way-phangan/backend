@@ -537,6 +537,7 @@ export async function addObjectPhotos(
 const PATCHABLE = new Set<keyof ObjectInsert>([
   "status", "priceThb", "pricePerRai", "rentPerRaiMonth", "rentPerMonth", "leaseTermYears",
   "district", "documentType", "tenure", "descriptionRaw", "areaNote", "locationUrl",
+  "descriptionManualEn", "descriptionManualRu", // deliberate manual description override (admin)
   "developer", "completion", "unitsAvailable", "titleEn", "driveFolder",
   // площадь — для дозаполнения каталога (детектор полноты /admin/valuation)
   "areaRai", "areaSqm",
