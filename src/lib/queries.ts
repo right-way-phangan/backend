@@ -59,6 +59,20 @@ async function assembleAll(db: AnyPgDatabase): Promise<RealEstateObject[]> {
   );
 }
 
+/**
+ * Strip seller-side PII from a public object. The public /objects endpoint must
+ * be safe by default: the web layer sanitizes too, but a deployed-but-not-yet-
+ * updated site won't know to drop a newly added field. So seller contacts (and
+ * the legacy ownerName) never leave this endpoint — they're admin-only, served
+ * via /objects/all. Defense in depth, not a substitute for web sanitize.
+ */
+function stripSellerPii(o: RealEstateObject): RealEstateObject {
+  const { contacts, ownerName, ...pub } = o;
+  void contacts;
+  void ownerName;
+  return pub;
+}
+
 /** Public listings grid: Active + has a cover photo, premium-first then recent. */
 export async function getPublicObjects(db: AnyPgDatabase): Promise<RealEstateObject[]> {
   const all = await assembleAll(db);
@@ -71,6 +85,7 @@ export async function getPublicObjects(db: AnyPgDatabase): Promise<RealEstateObj
     // and reappears here automatically once a price or description is added —
     // no manual re-listing needed (same pattern as the cover-photo gate above).
     .filter((o) => !!o.priceThb || !!o.descriptionRaw?.trim())
+    .map(stripSellerPii)
     .sort(sortByRecentAndPremium);
 }
 
