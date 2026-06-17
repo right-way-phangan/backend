@@ -8,12 +8,69 @@
  *  - SEO title (template, LLM-polished when ANTHROPIC_API_KEY is set)
  */
 import { eq, sql } from "drizzle-orm";
-import { objects, objectPhotos, objectDocs } from "../db/schema";
+import { objects, objectPhotos, objectDocs, objectContacts } from "../db/schema";
 import type { ObjectInsert } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
 import { generateObjectTitle, type TitleAttrs } from "./object-title";
 
 export class ObjectInputError extends Error {}
+
+/** One seller-side contact as accepted by the write path (create + replace). */
+export interface ObjectContactInput {
+  role?: string; // owner | broker | caretaker | lawyer | other
+  name?: string;
+  phone?: string;
+  line?: string;
+  whatsapp?: string;
+  telegram?: string;
+  note?: string;
+  isPrimary?: boolean;
+}
+
+const CONTACT_ROLES = new Set(["owner", "broker", "caretaker", "lawyer", "other"]);
+
+/**
+ * Split the legacy free-text owner field ("Khun Somchai · 084 362 7784") into a
+ * structured contact. Best-effort: the longest phone-looking run becomes phone,
+ * the remainder is the name. Whatever can't be parsed stays in `name` verbatim.
+ */
+export function parseOwnerContactText(text?: string): ObjectContactInput | null {
+  const s = (text ?? "").trim();
+  if (!s) return null;
+  const phoneMatch = s.match(/\+?\d[\d\s().-]{6,}\d/);
+  const phone = phoneMatch ? phoneMatch[0].trim() : undefined;
+  const name = (phone ? s.replace(phoneMatch![0], "") : s)
+    .replace(/[·,|]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return { role: "owner", name: name || undefined, phone, isPrimary: true };
+}
+
+/** Normalize an arbitrary contact input into row values (drops empty contacts). */
+function contactRowValues(c: ObjectContactInput, objectId: number, sort: number) {
+  const clean = (v?: string) => {
+    const t = (v ?? "").trim();
+    return t || null;
+  };
+  const role = c.role && CONTACT_ROLES.has(c.role) ? c.role : "owner";
+  const values = {
+    objectId,
+    role,
+    name: clean(c.name),
+    phone: clean(c.phone),
+    line: clean(c.line),
+    whatsapp: clean(c.whatsapp),
+    telegram: clean(c.telegram),
+    note: clean(c.note),
+    isPrimary: !!c.isPrimary,
+    sort,
+    updatedAt: new Date(),
+  };
+  // An all-empty contact (no name and no channel) carries nothing — skip it.
+  const hasContent =
+    values.name || values.phone || values.line || values.whatsapp || values.telegram || values.note;
+  return hasContent ? values : null;
+}
 
 export interface NewObjectInput {
   type: string;
@@ -29,7 +86,8 @@ export interface NewObjectInput {
   leaseAddTerms?: string;
   buildingRules?: string;
   priceThb?: number;
-  owner?: string;
+  owner?: string; // legacy free-text owner; seeded into object_contacts on create
+  contacts?: ObjectContactInput[]; // structured seller contacts (preferred)
   commission?: string;
   locationUrl?: string;
   plotPolygon?: Array<[number, number]>; // traced contour, [lat, lng] ring
@@ -372,6 +430,16 @@ export async function createObject(
         .insert(objectDocs)
         .values(input.docUrls.map((d) => ({ objectId: obj.id, name: d.name, url: d.url })));
     }
+    // Seller contacts: explicit structured list wins; otherwise seed one owner
+    // contact from the legacy free-text owner field so intake still captures
+    // "кто собственник" without a separate step.
+    const seed = input.contacts?.length
+      ? input.contacts
+      : [parseOwnerContactText(input.owner)].filter((c): c is ObjectContactInput => c != null);
+    const contactRows = seed
+      .map((c, i) => contactRowValues(c, obj.id, i))
+      .filter((r): r is NonNullable<typeof r> => r != null);
+    if (contactRows.length) await tx.insert(objectContacts).values(contactRows);
     return obj.id;
   });
 
@@ -458,6 +526,45 @@ export async function updateObject(
     .where(eq(objects.rwNumber, rwNumber))
     .returning({ rwNumber: objects.rwNumber });
   return row ?? null;
+}
+
+/**
+ * Replace the whole seller-contact list of an object (admin card editor + the
+ * outreach quick-edit both send the full list). Empty contacts are dropped; if
+ * none is flagged primary, the first survivor is promoted so outreach/table
+ * always have a contact to show. Returns the saved contacts in render order.
+ */
+export async function replaceObjectContacts(
+  db: AnyPgDatabase,
+  rwNumber: string,
+  contacts: ObjectContactInput[],
+): Promise<ObjectContactInput[] | null> {
+  const [obj] = await db
+    .select({ id: objects.id })
+    .from(objects)
+    .where(eq(objects.rwNumber, rwNumber));
+  if (!obj) return null;
+
+  const rows = (Array.isArray(contacts) ? contacts : [])
+    .map((c, i) => contactRowValues(c, obj.id, i))
+    .filter((r): r is NonNullable<typeof r> => r != null);
+  if (rows.length && !rows.some((r) => r.isPrimary)) rows[0].isPrimary = true;
+
+  await db.transaction(async (tx: AnyPgDatabase) => {
+    await tx.delete(objectContacts).where(eq(objectContacts.objectId, obj.id));
+    if (rows.length) await tx.insert(objectContacts).values(rows);
+  });
+
+  return rows.map((r) => ({
+    role: r.role,
+    name: r.name ?? undefined,
+    phone: r.phone ?? undefined,
+    line: r.line ?? undefined,
+    whatsapp: r.whatsapp ?? undefined,
+    telegram: r.telegram ?? undefined,
+    note: r.note ?? undefined,
+    isPrimary: r.isPrimary,
+  }));
 }
 
 export { sql };

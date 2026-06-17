@@ -9,6 +9,20 @@ type Pair = { label: string; value: string };
 type TimelineRow = { date: string; event: string };
 type TeamRow = { role: string; name: string };
 
+/** Seller-side contact for an object (owner/broker/caretaker/lawyer). NON-public. */
+export interface ObjectContact {
+  id?: number;
+  role: string; // owner | broker | caretaker | lawyer | other
+  name?: string;
+  phone?: string;
+  line?: string;
+  whatsapp?: string;
+  telegram?: string;
+  note?: string;
+  isPrimary?: boolean;
+  sort?: number;
+}
+
 export interface RealEstateObject {
   id: number;
   rwNumber: string;
@@ -67,6 +81,7 @@ export interface RealEstateObject {
   timeline?: TimelineRow[];
   team?: TeamRow[];
   ownerName?: string;
+  contacts?: ObjectContact[];
   buildingRules?: string;
   reasonForSelling?: string;
   timeOnMarketMonths?: number;
@@ -112,6 +127,7 @@ export function toDomain(
   row: ObjectRow,
   photos: PhotoRow[],
   docs: DocRow[],
+  contacts: ObjectContact[] = [],
 ): RealEstateObject {
   const gallery = [...photos]
     .sort((a, b) => a.sort - b.sort)
@@ -176,6 +192,7 @@ export function toDomain(
     timeline: u(row.timeline) ?? undefined,
     team: u(row.team) ?? undefined,
     ownerName: u(row.ownerName),
+    contacts: contacts.length ? contacts : undefined,
     buildingRules: u(row.buildingRules),
     reasonForSelling: u(row.reasonForSelling),
     timeOnMarketMonths: u(row.timeOnMarketMonths),

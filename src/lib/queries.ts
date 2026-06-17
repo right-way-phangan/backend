@@ -3,15 +3,16 @@
  * Driver-agnostic (takes any drizzle db). At ~80 rows we assemble in JS.
  */
 import { eq } from "drizzle-orm";
-import { objects, objectPhotos, objectDocs, projectUnits } from "../db/schema";
+import { objects, objectPhotos, objectDocs, objectContacts, projectUnits } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
-import { toDomain, sortByRecentAndPremium, type RealEstateObject } from "./domain";
+import { toDomain, sortByRecentAndPremium, type RealEstateObject, type ObjectContact } from "./domain";
 
 async function assembleAll(db: AnyPgDatabase): Promise<RealEstateObject[]> {
-  const [objs, phs, dcs] = await Promise.all([
+  const [objs, phs, dcs, cts] = await Promise.all([
     db.select().from(objects),
     db.select().from(objectPhotos),
     db.select().from(objectDocs),
+    db.select().from(objectContacts),
   ]);
 
   const photosByObj = new Map<number, typeof phs>();
@@ -26,12 +27,34 @@ async function assembleAll(db: AnyPgDatabase): Promise<RealEstateObject[]> {
     arr.push(d);
     docsByObj.set(d.objectId, arr);
   }
+  const contactsByObj = new Map<number, ObjectContact[]>();
+  for (const c of cts) {
+    const arr = contactsByObj.get(c.objectId) ?? [];
+    arr.push({
+      id: c.id,
+      role: c.role,
+      name: c.name ?? undefined,
+      phone: c.phone ?? undefined,
+      line: c.line ?? undefined,
+      whatsapp: c.whatsapp ?? undefined,
+      telegram: c.telegram ?? undefined,
+      note: c.note ?? undefined,
+      isPrimary: c.isPrimary,
+      sort: c.sort,
+    });
+    contactsByObj.set(c.objectId, arr);
+  }
+  // primary first, then by sort — the order the card/outreach render them.
+  for (const arr of contactsByObj.values()) {
+    arr.sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || (a.sort ?? 0) - (b.sort ?? 0));
+  }
 
   return objs.map((o) =>
     toDomain(
       o,
       (photosByObj.get(o.id) ?? []).map((p) => ({ url: p.url, sort: p.sort, isCover: p.isCover })),
       (docsByObj.get(o.id) ?? []).map((d) => ({ name: d.name, url: d.url })),
+      contactsByObj.get(o.id) ?? [],
     ),
   );
 }
