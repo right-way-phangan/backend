@@ -106,6 +106,8 @@ export interface RealEstateObject {
   gallery?: string[];
   docs?: Array<{ name: string; url: string }>;
   descriptionRaw?: string;
+  descriptionManualEn?: string;
+  descriptionManualRu?: string;
 }
 
 export interface PhotoRow {
@@ -222,6 +224,8 @@ export function toDomain(
     gallery: gallery.length ? gallery : undefined,
     docs: docs.length ? docs : undefined,
     descriptionRaw: u(row.descriptionRaw),
+    descriptionManualEn: u(row.descriptionManualEn),
+    descriptionManualRu: u(row.descriptionManualRu),
   };
 }
 

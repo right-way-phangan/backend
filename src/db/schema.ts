@@ -153,6 +153,11 @@ export const objects = pgTable(
 
     // Description
     descriptionRaw: text("description_raw"),
+    // Deliberate manual description override (EN/RU) — wins over the auto-
+    // generated description on the public page. Legacy amoCRM notes live in
+    // descriptionRaw and are NOT shown publicly; these are intentional copy.
+    descriptionManualEn: text("description_manual_en"),
+    descriptionManualRu: text("description_manual_ru"),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
