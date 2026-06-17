@@ -9,6 +9,20 @@ type Pair = { label: string; value: string };
 type TimelineRow = { date: string; event: string };
 type TeamRow = { role: string; name: string };
 
+/** Seller-side contact for an object (owner/broker/caretaker/lawyer). NON-public. */
+export interface ObjectContact {
+  id?: number;
+  role: string; // owner | broker | caretaker | lawyer | other
+  name?: string;
+  phone?: string;
+  line?: string;
+  whatsapp?: string;
+  telegram?: string;
+  note?: string;
+  isPrimary?: boolean;
+  sort?: number;
+}
+
 export interface RealEstateObject {
   id: number;
   rwNumber: string;
@@ -67,6 +81,7 @@ export interface RealEstateObject {
   timeline?: TimelineRow[];
   team?: TeamRow[];
   ownerName?: string;
+  contacts?: ObjectContact[];
   buildingRules?: string;
   reasonForSelling?: string;
   timeOnMarketMonths?: number;
@@ -105,10 +120,15 @@ export interface DocRow {
 /** null → undefined, so JSON output matches the site's `?: T` optional fields. */
 const u = <T>(v: T | null | undefined): T | undefined => (v == null ? undefined : v);
 
+/** Date → Unix-seconds string, matching the `dateAdded` storage convention. */
+const epochSecs = (d: Date | string | null | undefined): string | undefined =>
+  d ? String(Math.floor(new Date(d).getTime() / 1000)) : undefined;
+
 export function toDomain(
   row: ObjectRow,
   photos: PhotoRow[],
   docs: DocRow[],
+  contacts: ObjectContact[] = [],
 ): RealEstateObject {
   const gallery = [...photos]
     .sort((a, b) => a.sort - b.sort)
@@ -173,10 +193,14 @@ export function toDomain(
     timeline: u(row.timeline) ?? undefined,
     team: u(row.team) ?? undefined,
     ownerName: u(row.ownerName),
+    contacts: contacts.length ? contacts : undefined,
     buildingRules: u(row.buildingRules),
     reasonForSelling: u(row.reasonForSelling),
     timeOnMarketMonths: u(row.timeOnMarketMonths),
-    dateAdded: u(row.dateAdded),
+    // `date_added` is legacy amoCRM text; for own-DB rows it's redundant with
+    // `created_at`. Fall back so the field is never empty (the gap that broke
+    // prerender/sitemap and the "New" badge), in the same Unix-seconds format.
+    dateAdded: u(row.dateAdded)?.trim() || epochSecs(row.createdAt),
     ddStatus: u(row.ddStatus),
     ddDate: u(row.ddDate),
     ddLawyer: u(row.ddLawyer),

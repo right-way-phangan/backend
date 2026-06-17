@@ -134,6 +134,13 @@
       "when": 1781683677935,
       "tag": "0018_coords_approx",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1781689335913,
+      "tag": "0019_serious_rockslide",
+      "breakpoints": true
     }
   ]
 }

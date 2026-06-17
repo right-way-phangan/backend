@@ -18,7 +18,9 @@ import { cors } from "hono/cors";
 import { createDb } from "../db/connect";
 import { getPublicObjects, getAllObjects } from "../lib/queries";
 import { recentObjectMatches } from "../lib/matching";
-import { createObject, updateObject, addObjectPhotos, ObjectInputError } from "../lib/write";
+import {
+  createObject, updateObject, addObjectPhotos, replaceObjectContacts, ObjectInputError,
+} from "../lib/write";
 import {
   createLead, listLeads, listPipelines, updateLead, seedCrm,
   getLead, addNote, addTask, updateTask, listTasks, updateLeadContact, deleteLead,
@@ -206,6 +208,22 @@ app.post("/objects/:rw/photos", async (c) => {
   } catch (err) {
     console.error("[POST /objects/:rw/photos]", err);
     return c.json({ error: "add photos failed" }, 500);
+  }
+});
+
+/** Replace an object's seller contacts (admin card editor + outreach quick-edit). */
+app.put("/objects/:rw/contacts", async (c) => {
+  try {
+    const { contacts } = await c.req.json();
+    const res = await replaceObjectContacts(
+      db,
+      c.req.param("rw"),
+      Array.isArray(contacts) ? contacts : [],
+    );
+    return res ? c.json({ contacts: res }) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[PUT /objects/:rw/contacts]", err);
+    return c.json({ error: "save contacts failed" }, 500);
   }
 });
 

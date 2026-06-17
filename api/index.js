@@ -27,6 +27,7 @@ __export(schema_exports, {
   leadNotes: () => leadNotes,
   leadTasks: () => leadTasks,
   leads: () => leads,
+  objectContacts: () => objectContacts,
   objectDocs: () => objectDocs,
   objectEventsDaily: () => objectEventsDaily,
   objectPhotos: () => objectPhotos,
@@ -203,6 +204,26 @@ var objectDocs = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
   },
   (t) => ({ objIdx: index("object_docs_object_idx").on(t.objectId) })
+);
+var objectContacts = pgTable(
+  "object_contacts",
+  {
+    id: serial("id").primaryKey(),
+    objectId: integer("object_id").notNull().references(() => objects.id, { onDelete: "cascade" }),
+    role: text("role").notNull().default("owner"),
+    // owner | broker | caretaker | lawyer | other
+    name: text("name"),
+    phone: text("phone"),
+    line: text("line"),
+    whatsapp: text("whatsapp"),
+    telegram: text("telegram"),
+    note: text("note"),
+    isPrimary: boolean("is_primary").notNull().default(false),
+    sort: integer("sort").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({ objIdx: index("object_contacts_object_idx").on(t.objectId) })
 );
 var projectUnits = pgTable(
   "project_units",
@@ -567,7 +588,8 @@ import { eq } from "drizzle-orm";
 
 // src/lib/domain.ts
 var u = (v) => v == null ? void 0 : v;
-function toDomain(row, photos, docs) {
+var epochSecs = (d) => d ? String(Math.floor(new Date(d).getTime() / 1e3)) : void 0;
+function toDomain(row, photos, docs, contacts2 = []) {
   const gallery = [...photos].sort((a, b) => a.sort - b.sort).map((p) => p.url);
   const cover = photos.find((p) => p.isCover)?.url ?? gallery[0];
   return {
@@ -628,10 +650,14 @@ function toDomain(row, photos, docs) {
     timeline: u(row.timeline) ?? void 0,
     team: u(row.team) ?? void 0,
     ownerName: u(row.ownerName),
+    contacts: contacts2.length ? contacts2 : void 0,
     buildingRules: u(row.buildingRules),
     reasonForSelling: u(row.reasonForSelling),
     timeOnMarketMonths: u(row.timeOnMarketMonths),
-    dateAdded: u(row.dateAdded),
+    // `date_added` is legacy amoCRM text; for own-DB rows it's redundant with
+    // `created_at`. Fall back so the field is never empty (the gap that broke
+    // prerender/sitemap and the "New" badge), in the same Unix-seconds format.
+    dateAdded: u(row.dateAdded)?.trim() || epochSecs(row.createdAt),
     ddStatus: u(row.ddStatus),
     ddDate: u(row.ddDate),
     ddLawyer: u(row.ddLawyer),
@@ -662,10 +688,11 @@ function sortByRecentAndPremium(a, b) {
 
 // src/lib/queries.ts
 async function assembleAll(db2) {
-  const [objs, phs, dcs] = await Promise.all([
+  const [objs, phs, dcs, cts] = await Promise.all([
     db2.select().from(objects),
     db2.select().from(objectPhotos),
-    db2.select().from(objectDocs)
+    db2.select().from(objectDocs),
+    db2.select().from(objectContacts)
   ]);
   const photosByObj = /* @__PURE__ */ new Map();
   for (const p of phs) {
@@ -679,11 +706,32 @@ async function assembleAll(db2) {
     arr.push(d);
     docsByObj.set(d.objectId, arr);
   }
+  const contactsByObj = /* @__PURE__ */ new Map();
+  for (const c of cts) {
+    const arr = contactsByObj.get(c.objectId) ?? [];
+    arr.push({
+      id: c.id,
+      role: c.role,
+      name: c.name ?? void 0,
+      phone: c.phone ?? void 0,
+      line: c.line ?? void 0,
+      whatsapp: c.whatsapp ?? void 0,
+      telegram: c.telegram ?? void 0,
+      note: c.note ?? void 0,
+      isPrimary: c.isPrimary,
+      sort: c.sort
+    });
+    contactsByObj.set(c.objectId, arr);
+  }
+  for (const arr of contactsByObj.values()) {
+    arr.sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || (a.sort ?? 0) - (b.sort ?? 0));
+  }
   return objs.map(
     (o) => toDomain(
       o,
       (photosByObj.get(o.id) ?? []).map((p) => ({ url: p.url, sort: p.sort, isCover: p.isCover })),
-      (docsByObj.get(o.id) ?? []).map((d) => ({ name: d.name, url: d.url }))
+      (docsByObj.get(o.id) ?? []).map((d) => ({ name: d.name, url: d.url })),
+      contactsByObj.get(o.id) ?? []
     )
   );
 }
@@ -1413,6 +1461,37 @@ async function generateObjectTitle(a) {
 // src/lib/write.ts
 var ObjectInputError = class extends Error {
 };
+var CONTACT_ROLES = /* @__PURE__ */ new Set(["owner", "broker", "caretaker", "lawyer", "other"]);
+function parseOwnerContactText(text2) {
+  const s = (text2 ?? "").trim();
+  if (!s) return null;
+  const phoneMatch = s.match(/\+?\d[\d\s().-]{6,}\d/);
+  const phone = phoneMatch ? phoneMatch[0].trim() : void 0;
+  const name = (phone ? s.replace(phoneMatch[0], "") : s).replace(/[·,|]+/g, " ").replace(/\s{2,}/g, " ").trim();
+  return { role: "owner", name: name || void 0, phone, isPrimary: true };
+}
+function contactRowValues(c, objectId, sort) {
+  const clean2 = (v) => {
+    const t = (v ?? "").trim();
+    return t || null;
+  };
+  const role = c.role && CONTACT_ROLES.has(c.role) ? c.role : "owner";
+  const values = {
+    objectId,
+    role,
+    name: clean2(c.name),
+    phone: clean2(c.phone),
+    line: clean2(c.line),
+    whatsapp: clean2(c.whatsapp),
+    telegram: clean2(c.telegram),
+    note: clean2(c.note),
+    isPrimary: !!c.isPrimary,
+    sort,
+    updatedAt: /* @__PURE__ */ new Date()
+  };
+  const hasContent = values.name || values.phone || values.line || values.whatsapp || values.telegram || values.note;
+  return hasContent ? values : null;
+}
 function rwPrefixForType(type) {
   switch (type) {
     case "Land":
@@ -1691,6 +1770,9 @@ async function createObject(db2, input) {
     if (input.docUrls?.length) {
       await tx.insert(objectDocs).values(input.docUrls.map((d) => ({ objectId: obj.id, name: d.name, url: d.url })));
     }
+    const seed2 = input.contacts?.length ? input.contacts : [parseOwnerContactText(input.owner)].filter((c) => c != null);
+    const contactRows = seed2.map((c, i) => contactRowValues(c, obj.id, i)).filter((r) => r != null);
+    if (contactRows.length) await tx.insert(objectContacts).values(contactRows);
     return obj.id;
   });
   const base = process.env.SITE_BASE_URL ?? "";
@@ -1782,6 +1864,26 @@ async function updateObject(db2, rwNumber, patch) {
   }
   const [row] = await db2.update(objects).set(set).where(eq4(objects.rwNumber, rwNumber)).returning({ rwNumber: objects.rwNumber });
   return row ?? null;
+}
+async function replaceObjectContacts(db2, rwNumber, contacts2) {
+  const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq4(objects.rwNumber, rwNumber));
+  if (!obj) return null;
+  const rows = (Array.isArray(contacts2) ? contacts2 : []).map((c, i) => contactRowValues(c, obj.id, i)).filter((r) => r != null);
+  if (rows.length && !rows.some((r) => r.isPrimary)) rows[0].isPrimary = true;
+  await db2.transaction(async (tx) => {
+    await tx.delete(objectContacts).where(eq4(objectContacts.objectId, obj.id));
+    if (rows.length) await tx.insert(objectContacts).values(rows);
+  });
+  return rows.map((r) => ({
+    role: r.role,
+    name: r.name ?? void 0,
+    phone: r.phone ?? void 0,
+    line: r.line ?? void 0,
+    whatsapp: r.whatsapp ?? void 0,
+    telegram: r.telegram ?? void 0,
+    note: r.note ?? void 0,
+    isPrimary: r.isPrimary
+  }));
 }
 
 // src/lib/auth.ts
@@ -2519,6 +2621,20 @@ app.post("/objects/:rw/photos", async (c) => {
   } catch (err) {
     console.error("[POST /objects/:rw/photos]", err);
     return c.json({ error: "add photos failed" }, 500);
+  }
+});
+app.put("/objects/:rw/contacts", async (c) => {
+  try {
+    const { contacts: contacts2 } = await c.req.json();
+    const res = await replaceObjectContacts(
+      db,
+      c.req.param("rw"),
+      Array.isArray(contacts2) ? contacts2 : []
+    );
+    return res ? c.json({ contacts: res }) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[PUT /objects/:rw/contacts]", err);
+    return c.json({ error: "save contacts failed" }, 500);
   }
 });
 app.post("/track/view", async (c) => {

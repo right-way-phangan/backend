@@ -204,6 +204,43 @@ export const objectDocs = pgTable(
 );
 
 /**
+ * Object contacts — "кто собственник / с кем связываться" по объекту. NON-public
+ * (PII продавца): режется в web sanitizePublicObject так же, как ownerName/docs,
+ * никогда не доходит до браузера на публичных страницах. Несколько контактов на
+ * объект, у каждого роль (owner / broker / caretaker / lawyer / other), потому
+ * что на острове продавец, посредник-брокер, смотритель с ключами и юрист часто
+ * разные люди. Каналы — отдельными полями (phone/LINE/WhatsApp/Telegram): на
+ * Пангане у тайских собственников основной канал — LINE.
+ * `isPrimary` помечает контакт, с которого начинать (показывается в обзвоне и
+ * таблице объектов). Заменяет одно свободное поле objects.ownerName — старое
+ * значение перенесено сюда миграцией 0018 как owner-контакт.
+ */
+export const objectContacts = pgTable(
+  "object_contacts",
+  {
+    id: serial("id").primaryKey(),
+    objectId: integer("object_id")
+      .notNull()
+      .references(() => objects.id, { onDelete: "cascade" }),
+    role: text("role").notNull().default("owner"), // owner | broker | caretaker | lawyer | other
+    name: text("name"),
+    phone: text("phone"),
+    line: text("line"),
+    whatsapp: text("whatsapp"),
+    telegram: text("telegram"),
+    note: text("note"),
+    isPrimary: boolean("is_primary").notNull().default(false),
+    sort: integer("sort").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ objIdx: index("object_contacts_object_idx").on(t.objectId) }),
+);
+
+export type ObjectContactRow = typeof objectContacts.$inferSelect;
+export type ObjectContactInsert = typeof objectContacts.$inferInsert;
+
+/**
  * Per-unit detail for multi-unit off-plan projects (RW-P####, unit suffixes).
  * Forward-looking: the current amoCRM model only tracks unitsTotal/unitsAvailable
  * as counts, so the migration leaves this empty. New off-plan intake will fill it.
