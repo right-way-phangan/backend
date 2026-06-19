@@ -62,14 +62,16 @@ async function assembleAll(db: AnyPgDatabase): Promise<RealEstateObject[]> {
 /**
  * Strip seller-side PII from a public object. The public /objects endpoint must
  * be safe by default: the web layer sanitizes too, but a deployed-but-not-yet-
- * updated site won't know to drop a newly added field. So seller contacts (and
- * the legacy ownerName) never leave this endpoint — they're admin-only, served
- * via /objects/all. Defense in depth, not a substitute for web sanitize.
+ * updated site won't know to drop a newly added field. So seller contacts, docs
+ * (pricesheet/checklists/scans), and the legacy ownerName never leave this endpoint —
+ * they're admin-only, served via /objects/all. Defense in depth, not a substitute
+ * for web sanitize.
  */
 function stripSellerPii(o: RealEstateObject): RealEstateObject {
-  const { contacts, ownerName, ...pub } = o;
+  const { contacts, ownerName, docs, ...pub } = o;
   void contacts;
   void ownerName;
+  void docs;
   return pub;
 }
 
