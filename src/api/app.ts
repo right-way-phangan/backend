@@ -576,7 +576,9 @@ app.get("/agent-tasks/open-count", async (c) => {
 });
 
 app.get("/agent-tasks/:id", async (c) => {
-  const row = await getAgentTaskById(db, Number(c.req.param("id")));
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  const row = await getAgentTaskById(db, id);
   return row ? c.json(row) : c.json({ error: "not found" }, 404);
 });
 
@@ -594,28 +596,35 @@ app.post("/agent-tasks", async (c) => {
 
 /** Отметить выполненной / вернуть в открытые / переименовать. {status?, text?} */
 app.patch("/agent-tasks/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
   try {
-    const res = await updateAgentTask(db, Number(c.req.param("id")), await c.req.json());
+    const res = await updateAgentTask(db, id, await c.req.json());
     return res ? c.json(res) : c.json({ error: "not found" }, 404);
   } catch (err) {
+    if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
     console.error("[PATCH /agent-tasks]", err);
     return c.json({ error: "update failed" }, 500);
   }
 });
 
 app.delete("/agent-tasks/:id", async (c) => {
-  const ok = await deleteAgentTask(db, Number(c.req.param("id")));
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  const ok = await deleteAgentTask(db, id);
   return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
 });
 
 /** История советов консилиума. Query: ?limit=N (свежие первыми). */
 app.get("/council-sessions", async (c) => {
-  const limit = Number(c.req.query("limit")) || 20;
+  const limit = Math.min(Math.max(Number(c.req.query("limit")) || 20, 1), 100);
   return c.json(await listSessions(db, limit));
 });
 
 app.get("/council-sessions/:id", async (c) => {
-  const row = await getSessionById(db, Number(c.req.param("id")));
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  const row = await getSessionById(db, id);
   return row ? c.json(row) : c.json({ error: "not found" }, 404);
 });
 

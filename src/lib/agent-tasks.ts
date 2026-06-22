@@ -79,7 +79,11 @@ export async function updateTask(
     set.status = patch.status;
     set.doneAt = patch.status === "done" ? new Date() : null;
   }
-  if (patch.text !== undefined) set.text = String(patch.text).trim();
+  if (patch.text !== undefined) {
+    const t = String(patch.text).trim();
+    if (!t) throw new AgentTaskInputError("text cannot be empty"); // симметрия с createTask
+    set.text = t;
+  }
   if (Object.keys(set).length === 0) return getTaskById(db, id);
   const [row] = await db.update(agentTasks).set(set).where(eq(agentTasks.id, id)).returning();
   return row ?? null;

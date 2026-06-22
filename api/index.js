@@ -2309,7 +2309,11 @@ async function updateTask2(db2, id, patch) {
     set.status = patch.status;
     set.doneAt = patch.status === "done" ? /* @__PURE__ */ new Date() : null;
   }
-  if (patch.text !== void 0) set.text = String(patch.text).trim();
+  if (patch.text !== void 0) {
+    const t = String(patch.text).trim();
+    if (!t) throw new AgentTaskInputError("text cannot be empty");
+    set.text = t;
+  }
   if (Object.keys(set).length === 0) return getTaskById(db2, id);
   const [row] = await db2.update(agentTasks).set(set).where(eq10(agentTasks.id, id)).returning();
   return row ?? null;
@@ -2987,7 +2991,9 @@ app.get("/agent-tasks/open-count", async (c) => {
   return c.json({ count: await countOpenTasks(db) });
 });
 app.get("/agent-tasks/:id", async (c) => {
-  const row = await getTaskById(db, Number(c.req.param("id")));
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  const row = await getTaskById(db, id);
   return row ? c.json(row) : c.json({ error: "not found" }, 404);
 });
 app.post("/agent-tasks", async (c) => {
@@ -3001,24 +3007,31 @@ app.post("/agent-tasks", async (c) => {
   }
 });
 app.patch("/agent-tasks/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
   try {
-    const res = await updateTask2(db, Number(c.req.param("id")), await c.req.json());
+    const res = await updateTask2(db, id, await c.req.json());
     return res ? c.json(res) : c.json({ error: "not found" }, 404);
   } catch (err) {
+    if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
     console.error("[PATCH /agent-tasks]", err);
     return c.json({ error: "update failed" }, 500);
   }
 });
 app.delete("/agent-tasks/:id", async (c) => {
-  const ok = await deleteTask(db, Number(c.req.param("id")));
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  const ok = await deleteTask(db, id);
   return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
 });
 app.get("/council-sessions", async (c) => {
-  const limit = Number(c.req.query("limit")) || 20;
+  const limit = Math.min(Math.max(Number(c.req.query("limit")) || 20, 1), 100);
   return c.json(await listSessions(db, limit));
 });
 app.get("/council-sessions/:id", async (c) => {
-  const row = await getSessionById(db, Number(c.req.param("id")));
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  const row = await getSessionById(db, id);
   return row ? c.json(row) : c.json({ error: "not found" }, 404);
 });
 app.post("/council-sessions", async (c) => {
