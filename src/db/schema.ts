@@ -606,12 +606,21 @@ export const councilSessions = pgTable(
   {
     id: serial("id").primaryKey(),
     question: text("question").notNull(),
-    answer: text("answer").notNull(),
-    source: text("source").notNull().default("advice"), // advice | task
+    // Пусто, пока совет не готов (веб-запрос в очереди). Готовые советы из бота
+    // приходят сразу с answer. default '' — чтобы pending-строка была валидной.
+    answer: text("answer").notNull().default(""),
+    source: text("source").notNull().default("advice"), // advice | task | web
+    // Лайфцикл (для веб-двери «Спросить совет», асинхронной через бот-поллер):
+    // done = готов (дефолт — бот пишет готовые); pending = в очереди; processing =
+    // бот считает; error = упал. Локальный claude-«мозг» обрабатывает pending.
+    status: text("status").notNull().default("done"),
+    errorText: text("error_text"), // если status=error
+    answeredAt: timestamp("answered_at", { withTimezone: true }), // когда лёг ответ
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     createdIdx: index("council_sessions_created_idx").on(t.createdAt),
+    statusIdx: index("council_sessions_status_idx").on(t.status),
   }),
 );
 

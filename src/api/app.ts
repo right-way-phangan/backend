@@ -39,8 +39,8 @@ import {
 import {
   createTask as createAgentTask, listTasks as listAgentTasks,
   getTaskById as getAgentTaskById, countOpenTasks, updateTask as updateAgentTask,
-  deleteTask as deleteAgentTask, createSession, listSessions, getSessionById,
-  AgentTaskInputError,
+  deleteTask as deleteAgentTask, createSession, requestCouncil, updateSession,
+  listSessions, getSessionById, AgentTaskInputError,
 } from "../lib/agent-tasks";
 import { handleContactUpdate, contactSelfCheck, type ContactBotConfig } from "../lib/contact-bot";
 import {
@@ -615,10 +615,11 @@ app.delete("/agent-tasks/:id", async (c) => {
   return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
 });
 
-/** История советов консилиума. Query: ?limit=N (свежие первыми). */
+/** История советов. Query: ?limit=N &status=pending|processing|done|error (свежие первыми). */
 app.get("/council-sessions", async (c) => {
   const limit = Math.min(Math.max(Number(c.req.query("limit")) || 20, 1), 100);
-  return c.json(await listSessions(db, limit));
+  const status = c.req.query("status") || undefined;
+  return c.json(await listSessions(db, { status, limit }));
 });
 
 app.get("/council-sessions/:id", async (c) => {
@@ -628,7 +629,7 @@ app.get("/council-sessions/:id", async (c) => {
   return row ? c.json(row) : c.json({ error: "not found" }, 404);
 });
 
-/** Сохранить сессию совета (бот после каждого /совет). */
+/** Сохранить готовый совет (бот после /совет в Telegram → status=done). */
 app.post("/council-sessions", async (c) => {
   try {
     const res = await createSession(db, await c.req.json());
@@ -637,6 +638,32 @@ app.post("/council-sessions", async (c) => {
     if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
     console.error("[POST /council-sessions]", err);
     return c.json({ error: "create failed" }, 500);
+  }
+});
+
+/** Веб-дверь «Спросить совет»: кладёт вопрос в очередь (status=pending).
+ *  Локальный бот-поллер заберёт его, посчитает на Max и заполнит ответ. */
+app.post("/council-sessions/ask", async (c) => {
+  try {
+    const res = await requestCouncil(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /council-sessions/ask]", err);
+    return c.json({ error: "request failed" }, 500);
+  }
+});
+
+/** Бот: claim (status=processing) и завершение (answer+done / error). */
+app.patch("/council-sessions/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const res = await updateSession(db, id, await c.req.json());
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[PATCH /council-sessions]", err);
+    return c.json({ error: "update failed" }, 500);
   }
 });
 

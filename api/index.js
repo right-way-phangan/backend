@@ -498,13 +498,24 @@ var councilSessions = pgTable(
   {
     id: serial("id").primaryKey(),
     question: text("question").notNull(),
-    answer: text("answer").notNull(),
+    // Пусто, пока совет не готов (веб-запрос в очереди). Готовые советы из бота
+    // приходят сразу с answer. default '' — чтобы pending-строка была валидной.
+    answer: text("answer").notNull().default(""),
     source: text("source").notNull().default("advice"),
-    // advice | task
+    // advice | task | web
+    // Лайфцикл (для веб-двери «Спросить совет», асинхронной через бот-поллер):
+    // done = готов (дефолт — бот пишет готовые); pending = в очереди; processing =
+    // бот считает; error = упал. Локальный claude-«мозг» обрабатывает pending.
+    status: text("status").notNull().default("done"),
+    errorText: text("error_text"),
+    // если status=error
+    answeredAt: timestamp("answered_at", { withTimezone: true }),
+    // когда лёг ответ
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
   },
   (t) => ({
-    createdIdx: index("council_sessions_created_idx").on(t.createdAt)
+    createdIdx: index("council_sessions_created_idx").on(t.createdAt),
+    statusIdx: index("council_sessions_status_idx").on(t.status)
   })
 );
 var processedUpdates = pgTable("processed_updates", {
@@ -2326,11 +2337,35 @@ async function createSession(db2, input) {
   const question = String(input.question ?? "").trim();
   const answer = String(input.answer ?? "").trim();
   if (!question || !answer) throw new AgentTaskInputError("question and answer are required");
-  const [row] = await db2.insert(councilSessions).values({ question, answer, source: input.source?.trim() || "advice" }).returning();
+  const [row] = await db2.insert(councilSessions).values({
+    question,
+    answer,
+    source: input.source?.trim() || "advice",
+    status: "done",
+    answeredAt: /* @__PURE__ */ new Date()
+  }).returning();
   return row;
 }
-async function listSessions(db2, limit = 20) {
-  return db2.select().from(councilSessions).orderBy(desc3(councilSessions.createdAt)).limit(limit);
+async function requestCouncil(db2, input) {
+  const question = String(input.question ?? "").trim();
+  if (!question) throw new AgentTaskInputError("question is required");
+  const [row] = await db2.insert(councilSessions).values({ question, answer: "", source: input.source?.trim() || "web", status: "pending" }).returning();
+  return row;
+}
+async function updateSession(db2, id, patch) {
+  const set = {};
+  if (patch.status !== void 0) {
+    set.status = patch.status;
+    if (patch.status === "done" || patch.status === "error") set.answeredAt = /* @__PURE__ */ new Date();
+  }
+  if (patch.answer !== void 0) set.answer = patch.answer;
+  if (patch.errorText !== void 0) set.errorText = patch.errorText;
+  if (Object.keys(set).length === 0) return getSessionById(db2, id);
+  const [row] = await db2.update(councilSessions).set(set).where(eq10(councilSessions.id, id)).returning();
+  return row ?? null;
+}
+async function listSessions(db2, opts = {}) {
+  return db2.select().from(councilSessions).where(opts.status ? eq10(councilSessions.status, opts.status) : void 0).orderBy(desc3(councilSessions.createdAt)).limit(opts.limit ?? 20);
 }
 async function getSessionById(db2, id) {
   const [row] = await db2.select().from(councilSessions).where(eq10(councilSessions.id, id)).limit(1);
@@ -3026,7 +3061,8 @@ app.delete("/agent-tasks/:id", async (c) => {
 });
 app.get("/council-sessions", async (c) => {
   const limit = Math.min(Math.max(Number(c.req.query("limit")) || 20, 1), 100);
-  return c.json(await listSessions(db, limit));
+  const status = c.req.query("status") || void 0;
+  return c.json(await listSessions(db, { status, limit }));
 });
 app.get("/council-sessions/:id", async (c) => {
   const id = Number(c.req.param("id"));
@@ -3042,6 +3078,27 @@ app.post("/council-sessions", async (c) => {
     if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
     console.error("[POST /council-sessions]", err);
     return c.json({ error: "create failed" }, 500);
+  }
+});
+app.post("/council-sessions/ask", async (c) => {
+  try {
+    const res = await requestCouncil(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /council-sessions/ask]", err);
+    return c.json({ error: "request failed" }, 500);
+  }
+});
+app.patch("/council-sessions/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const res = await updateSession(db, id, await c.req.json());
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[PATCH /council-sessions]", err);
+    return c.json({ error: "update failed" }, 500);
   }
 });
 app.get("/valuation/factors", async (c) => {

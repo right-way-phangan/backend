@@ -102,6 +102,7 @@ export interface CouncilSessionInputDTO {
   source?: string; // advice | task
 }
 
+/** Готовый совет (бот из Telegram пишет сразу с ответом → status=done). */
 export async function createSession(
   db: AnyPgDatabase,
   input: CouncilSessionInputDTO,
@@ -111,14 +112,71 @@ export async function createSession(
   if (!question || !answer) throw new AgentTaskInputError("question and answer are required");
   const [row] = await db
     .insert(councilSessions)
-    .values({ question, answer, source: input.source?.trim() || "advice" })
+    .values({
+      question,
+      answer,
+      source: input.source?.trim() || "advice",
+      status: "done",
+      answeredAt: new Date(),
+    })
     .returning();
   return row;
 }
 
-/** Последние сессии, самые свежие первыми (как list_sessions в боте). */
-export async function listSessions(db: AnyPgDatabase, limit = 20): Promise<CouncilSessionRow[]> {
-  return db.select().from(councilSessions).orderBy(desc(councilSessions.createdAt)).limit(limit);
+/** Веб-дверь «Спросить совет»: кладёт вопрос в очередь (status=pending, answer='').
+ *  Локальный бот-поллер заберёт pending, посчитает на Max и заполнит ответ. */
+export async function requestCouncil(
+  db: AnyPgDatabase,
+  input: { question: string; source?: string },
+): Promise<CouncilSessionRow> {
+  const question = String(input.question ?? "").trim();
+  if (!question) throw new AgentTaskInputError("question is required");
+  const [row] = await db
+    .insert(councilSessions)
+    .values({ question, answer: "", source: input.source?.trim() || "web", status: "pending" })
+    .returning();
+  return row;
+}
+
+export interface CouncilSessionPatchDTO {
+  status?: string; // pending | processing | done | error
+  answer?: string;
+  errorText?: string | null;
+}
+
+/** Бот: claim (status=processing) и завершение (answer+done / error). */
+export async function updateSession(
+  db: AnyPgDatabase,
+  id: number,
+  patch: CouncilSessionPatchDTO,
+): Promise<CouncilSessionRow | null> {
+  const set: Record<string, unknown> = {};
+  if (patch.status !== undefined) {
+    set.status = patch.status;
+    if (patch.status === "done" || patch.status === "error") set.answeredAt = new Date();
+  }
+  if (patch.answer !== undefined) set.answer = patch.answer;
+  if (patch.errorText !== undefined) set.errorText = patch.errorText;
+  if (Object.keys(set).length === 0) return getSessionById(db, id);
+  const [row] = await db
+    .update(councilSessions)
+    .set(set)
+    .where(eq(councilSessions.id, id))
+    .returning();
+  return row ?? null;
+}
+
+/** Последние сессии, самые свежие первыми. opts.status — фильтр (poller: pending). */
+export async function listSessions(
+  db: AnyPgDatabase,
+  opts: { status?: string; limit?: number } = {},
+): Promise<CouncilSessionRow[]> {
+  return db
+    .select()
+    .from(councilSessions)
+    .where(opts.status ? eq(councilSessions.status, opts.status) : undefined)
+    .orderBy(desc(councilSessions.createdAt))
+    .limit(opts.limit ?? 20);
 }
 
 export async function getSessionById(db: AnyPgDatabase, id: number): Promise<CouncilSessionRow | null> {

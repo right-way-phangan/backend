@@ -162,6 +162,13 @@
       "when": 1782125497020,
       "tag": "0022_flaky_luminals",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1782155937601,
+      "tag": "0023_simple_black_knight",
+      "breakpoints": true
     }
   ]
 }
