@@ -155,6 +155,13 @@
       "when": 1781704975710,
       "tag": "0021_living_sway",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1782125497020,
+      "tag": "0022_flaky_luminals",
+      "breakpoints": true
     }
   ]
 }

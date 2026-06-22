@@ -36,6 +36,12 @@ import {
   createArticle, listArticles, getArticleById, getArticleBySlug,
   updateArticle, deleteArticle, countPending, ArticleInputError,
 } from "../lib/articles";
+import {
+  createTask as createAgentTask, listTasks as listAgentTasks,
+  getTaskById as getAgentTaskById, countOpenTasks, updateTask as updateAgentTask,
+  deleteTask as deleteAgentTask, createSession, listSessions, getSessionById,
+  AgentTaskInputError,
+} from "../lib/agent-tasks";
 import { handleContactUpdate, contactSelfCheck, type ContactBotConfig } from "../lib/contact-bot";
 import {
   listFactorOverrides, setFactorOverrides, listComps, addComp, updateComp, deleteComp,
@@ -552,6 +558,77 @@ app.patch("/articles/:id", async (c) => {
 app.delete("/articles/:id", async (c) => {
   const ok = await deleteArticle(db, Number(c.req.param("id")));
   return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+
+// ─── AI-команда: задачи (голос/текст/совет) + история советов ───
+// Источник правды для /admin/agents и бота. Бот пишет сюда, откатываясь на
+// локальный JSONL только при недоступном API. См. project_ai_council.
+
+/** Список задач. Query: ?status=open|done (по умолчанию — все). */
+app.get("/agent-tasks", async (c) => {
+  const status = c.req.query("status") as "open" | "done" | undefined;
+  return c.json(await listAgentTasks(db, { status }));
+});
+
+/** Счётчик открытых — для бейджа в навигации /admin. */
+app.get("/agent-tasks/open-count", async (c) => {
+  return c.json({ count: await countOpenTasks(db) });
+});
+
+app.get("/agent-tasks/:id", async (c) => {
+  const row = await getAgentTaskById(db, Number(c.req.param("id")));
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+
+/** Создать задачу (бот: голос/текст/совет). */
+app.post("/agent-tasks", async (c) => {
+  try {
+    const res = await createAgentTask(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /agent-tasks]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+
+/** Отметить выполненной / вернуть в открытые / переименовать. {status?, text?} */
+app.patch("/agent-tasks/:id", async (c) => {
+  try {
+    const res = await updateAgentTask(db, Number(c.req.param("id")), await c.req.json());
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[PATCH /agent-tasks]", err);
+    return c.json({ error: "update failed" }, 500);
+  }
+});
+
+app.delete("/agent-tasks/:id", async (c) => {
+  const ok = await deleteAgentTask(db, Number(c.req.param("id")));
+  return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+
+/** История советов консилиума. Query: ?limit=N (свежие первыми). */
+app.get("/council-sessions", async (c) => {
+  const limit = Number(c.req.query("limit")) || 20;
+  return c.json(await listSessions(db, limit));
+});
+
+app.get("/council-sessions/:id", async (c) => {
+  const row = await getSessionById(db, Number(c.req.param("id")));
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+
+/** Сохранить сессию совета (бот после каждого /совет). */
+app.post("/council-sessions", async (c) => {
+  try {
+    const res = await createSession(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /council-sessions]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
 });
 
 // ---- «RW Оценка» — состояние оценщика (движок считает в web) ----

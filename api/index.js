@@ -19,10 +19,12 @@ import "dotenv/config";
 // src/db/schema.ts
 var schema_exports = {};
 __export(schema_exports, {
+  agentTasks: () => agentTasks,
   appSettings: () => appSettings,
   articles: () => articles,
   contactThreads: () => contactThreads,
   contacts: () => contacts,
+  councilSessions: () => councilSessions,
   leadEvents: () => leadEvents,
   leadNotes: () => leadNotes,
   leadTasks: () => leadTasks,
@@ -173,6 +175,11 @@ var objects = pgTable(
     siteUrl: text("site_url"),
     // Description
     descriptionRaw: text("description_raw"),
+    // Deliberate manual description override (EN/RU) — wins over the auto-
+    // generated description on the public page. Legacy amoCRM notes live in
+    // descriptionRaw and are NOT shown publicly; these are intentional copy.
+    descriptionManualEn: text("description_manual_en"),
+    descriptionManualRu: text("description_manual_ru"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
   },
@@ -469,6 +476,37 @@ var articles = pgTable(
     slugLangIdx: uniqueIndex("articles_slug_lang_unique").on(t.slug, t.lang)
   })
 );
+var agentTasks = pgTable(
+  "agent_tasks",
+  {
+    id: serial("id").primaryKey(),
+    text: text("text").notNull(),
+    status: text("status").notNull().default("open"),
+    // open | done
+    source: text("source").notNull().default("text"),
+    // voice | text | council
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    doneAt: timestamp("done_at", { withTimezone: true })
+    // когда отметили выполненной
+  },
+  (t) => ({
+    statusIdx: index("agent_tasks_status_idx").on(t.status)
+  })
+);
+var councilSessions = pgTable(
+  "council_sessions",
+  {
+    id: serial("id").primaryKey(),
+    question: text("question").notNull(),
+    answer: text("answer").notNull(),
+    source: text("source").notNull().default("advice"),
+    // advice | task
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({
+    createdIdx: index("council_sessions_created_idx").on(t.createdAt)
+  })
+);
 var processedUpdates = pgTable("processed_updates", {
   updateId: bigint("update_id", { mode: "number" }).primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
@@ -680,7 +718,9 @@ function toDomain(row, photos, docs, contacts2 = []) {
     coverImage: cover,
     gallery: gallery.length ? gallery : void 0,
     docs: docs.length ? docs : void 0,
-    descriptionRaw: u(row.descriptionRaw)
+    descriptionRaw: u(row.descriptionRaw),
+    descriptionManualEn: u(row.descriptionManualEn),
+    descriptionManualRu: u(row.descriptionManualRu)
   };
 }
 function sortByRecentAndPremium(a, b) {
@@ -740,9 +780,10 @@ async function assembleAll(db2) {
   );
 }
 function stripSellerPii(o) {
-  const { contacts: contacts2, ownerName, ...pub } = o;
+  const { contacts: contacts2, ownerName, docs, ...pub } = o;
   void contacts2;
   void ownerName;
+  void docs;
   return pub;
 }
 async function getPublicObjects(db2) {
@@ -1821,6 +1862,9 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "descriptionRaw",
   "areaNote",
   "locationUrl",
+  "descriptionManualEn",
+  "descriptionManualRu",
+  // deliberate manual description override (admin)
   "developer",
   "completion",
   "unitsAvailable",
@@ -2237,8 +2281,60 @@ async function deleteArticle(db2, id) {
   return res.length > 0;
 }
 
+// src/lib/agent-tasks.ts
+import { eq as eq10, desc as desc3 } from "drizzle-orm";
+var AgentTaskInputError = class extends Error {
+};
+var TASK_STATUSES = ["open", "done"];
+async function createTask(db2, input) {
+  const text2 = String(input.text ?? "").trim();
+  if (!text2) throw new AgentTaskInputError("text is required");
+  const [row] = await db2.insert(agentTasks).values({ text: text2, source: input.source?.trim() || "text" }).returning();
+  return row;
+}
+async function listTasks2(db2, opts = {}) {
+  return db2.select().from(agentTasks).where(opts.status ? eq10(agentTasks.status, opts.status) : void 0).orderBy(desc3(agentTasks.createdAt)).limit(opts.limit ?? 200);
+}
+async function getTaskById(db2, id) {
+  const [row] = await db2.select().from(agentTasks).where(eq10(agentTasks.id, id)).limit(1);
+  return row ?? null;
+}
+async function countOpenTasks(db2) {
+  const rows = await db2.select({ id: agentTasks.id }).from(agentTasks).where(eq10(agentTasks.status, "open"));
+  return rows.length;
+}
+async function updateTask2(db2, id, patch) {
+  const set = {};
+  if (patch.status && TASK_STATUSES.includes(patch.status)) {
+    set.status = patch.status;
+    set.doneAt = patch.status === "done" ? /* @__PURE__ */ new Date() : null;
+  }
+  if (patch.text !== void 0) set.text = String(patch.text).trim();
+  if (Object.keys(set).length === 0) return getTaskById(db2, id);
+  const [row] = await db2.update(agentTasks).set(set).where(eq10(agentTasks.id, id)).returning();
+  return row ?? null;
+}
+async function deleteTask(db2, id) {
+  const res = await db2.delete(agentTasks).where(eq10(agentTasks.id, id)).returning({ id: agentTasks.id });
+  return res.length > 0;
+}
+async function createSession(db2, input) {
+  const question = String(input.question ?? "").trim();
+  const answer = String(input.answer ?? "").trim();
+  if (!question || !answer) throw new AgentTaskInputError("question and answer are required");
+  const [row] = await db2.insert(councilSessions).values({ question, answer, source: input.source?.trim() || "advice" }).returning();
+  return row;
+}
+async function listSessions(db2, limit = 20) {
+  return db2.select().from(councilSessions).orderBy(desc3(councilSessions.createdAt)).limit(limit);
+}
+async function getSessionById(db2, id) {
+  const [row] = await db2.select().from(councilSessions).where(eq10(councilSessions.id, id)).limit(1);
+  return row ?? null;
+}
+
 // src/lib/contact-bot.ts
-import { eq as eq10 } from "drizzle-orm";
+import { eq as eq11 } from "drizzle-orm";
 var SITE2 = "https://rightwaygroup.co";
 var FLOOD_WINDOW_MS = 6e4;
 var FLOOD_MAX = 16;
@@ -2290,7 +2386,7 @@ async function handleContactUpdate(db2, update, cfg) {
   if (!msg || !msg.from || msg.from.is_bot) return;
   if (msg.from.id === cfg.ownerId) {
     if (!msg.reply_to_message) return;
-    const rows = await db2.select().from(contactThreads).where(eq10(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
+    const rows = await db2.select().from(contactThreads).where(eq11(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
     const thread = rows[0];
     if (!thread) {
       await tg(cfg, "sendMessage", {
@@ -2332,7 +2428,7 @@ async function handleContactUpdate(db2, update, cfg) {
       return;
     }
   }
-  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq10(contactThreads.clientChatId, msg.chat.id));
+  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq11(contactThreads.clientChatId, msg.chat.id));
   const firstContact = history.length === 0;
   const cutoff = new Date(Date.now() - FLOOD_WINDOW_MS);
   const recent = history.filter((h2) => h2.createdAt > cutoff).length;
@@ -2399,7 +2495,7 @@ ${problems.join("\n")}`,
 }
 
 // src/lib/valuation.ts
-import { eq as eq11, desc as desc3 } from "drizzle-orm";
+import { eq as eq12, desc as desc4 } from "drizzle-orm";
 var ValuationInputError = class extends Error {
 };
 async function listFactorOverrides(db2) {
@@ -2410,7 +2506,7 @@ async function setFactorOverrides(db2, entries) {
     const key = String(e.key ?? "").trim();
     if (!key) throw new ValuationInputError("factor key is required");
     if (e.value === null) {
-      await db2.delete(valuationFactors).where(eq11(valuationFactors.key, key));
+      await db2.delete(valuationFactors).where(eq12(valuationFactors.key, key));
       continue;
     }
     const value = Number(e.value);
@@ -2424,7 +2520,7 @@ async function setFactorOverrides(db2, entries) {
 var COMP_TYPES = ["Land", "Villa", "House", "Apartment"];
 var COMP_STATUSES = ["active", "sold", "gone"];
 async function listComps(db2) {
-  return db2.select().from(valuationComps).orderBy(desc3(valuationComps.createdAt));
+  return db2.select().from(valuationComps).orderBy(desc4(valuationComps.createdAt));
 }
 async function addComp(db2, input) {
   const priceThb = Number(input.priceThb);
@@ -2469,11 +2565,11 @@ async function updateComp(db2, id, patch) {
   }
   if (patch.note !== void 0) set.note = patch.note?.trim() || null;
   if (Object.keys(set).length === 0) return null;
-  const [row] = await db2.update(valuationComps).set(set).where(eq11(valuationComps.id, id)).returning();
+  const [row] = await db2.update(valuationComps).set(set).where(eq12(valuationComps.id, id)).returning();
   return row ?? null;
 }
 async function deleteComp(db2, id) {
-  const rows = await db2.delete(valuationComps).where(eq11(valuationComps.id, id)).returning();
+  const rows = await db2.delete(valuationComps).where(eq12(valuationComps.id, id)).returning();
   return rows.length > 0;
 }
 async function logValuation(db2, input) {
@@ -2495,7 +2591,7 @@ async function logValuation(db2, input) {
   return row;
 }
 async function listValuations(db2, limit = 20) {
-  return db2.select().from(valuations).orderBy(desc3(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
+  return db2.select().from(valuations).orderBy(desc4(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
 }
 
 // src/lib/ratelimit.ts
@@ -2882,6 +2978,58 @@ app.patch("/articles/:id", async (c) => {
 app.delete("/articles/:id", async (c) => {
   const ok = await deleteArticle(db, Number(c.req.param("id")));
   return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+app.get("/agent-tasks", async (c) => {
+  const status = c.req.query("status");
+  return c.json(await listTasks2(db, { status }));
+});
+app.get("/agent-tasks/open-count", async (c) => {
+  return c.json({ count: await countOpenTasks(db) });
+});
+app.get("/agent-tasks/:id", async (c) => {
+  const row = await getTaskById(db, Number(c.req.param("id")));
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+app.post("/agent-tasks", async (c) => {
+  try {
+    const res = await createTask(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /agent-tasks]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+app.patch("/agent-tasks/:id", async (c) => {
+  try {
+    const res = await updateTask2(db, Number(c.req.param("id")), await c.req.json());
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[PATCH /agent-tasks]", err);
+    return c.json({ error: "update failed" }, 500);
+  }
+});
+app.delete("/agent-tasks/:id", async (c) => {
+  const ok = await deleteTask(db, Number(c.req.param("id")));
+  return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+app.get("/council-sessions", async (c) => {
+  const limit = Number(c.req.query("limit")) || 20;
+  return c.json(await listSessions(db, limit));
+});
+app.get("/council-sessions/:id", async (c) => {
+  const row = await getSessionById(db, Number(c.req.param("id")));
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+app.post("/council-sessions", async (c) => {
+  try {
+    const res = await createSession(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /council-sessions]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
 });
 app.get("/valuation/factors", async (c) => {
   const rows = await listFactorOverrides(db);

@@ -576,6 +576,47 @@ export const articles = pgTable(
 export type ArticleRow = typeof articles.$inferSelect;
 export type ArticleInsert = typeof articles.$inferInsert;
 
+// ============================================================
+// AI-команда: личный список задач (голос/текст/совет → задача) и история советов
+// консилиума. Источник правды переехал из локального JSONL бота в БД, чтобы
+// /admin/agents мог их показать (web на Vercel не видит локальные файлы бота).
+// Бот (bot/tasks.py, bot/council_log.py) пишет сюда через API и откатывается на
+// локальный JSONL только если API недоступен. См. project_ai_council.
+// ============================================================
+
+export const agentTasks = pgTable(
+  "agent_tasks",
+  {
+    id: serial("id").primaryKey(),
+    text: text("text").notNull(),
+    status: text("status").notNull().default("open"), // open | done
+    source: text("source").notNull().default("text"), // voice | text | council
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    doneAt: timestamp("done_at", { withTimezone: true }), // когда отметили выполненной
+  },
+  (t) => ({
+    statusIdx: index("agent_tasks_status_idx").on(t.status),
+  }),
+);
+
+export type AgentTaskRow = typeof agentTasks.$inferSelect;
+
+export const councilSessions = pgTable(
+  "council_sessions",
+  {
+    id: serial("id").primaryKey(),
+    question: text("question").notNull(),
+    answer: text("answer").notNull(),
+    source: text("source").notNull().default("advice"), // advice | task
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    createdIdx: index("council_sessions_created_idx").on(t.createdAt),
+  }),
+);
+
+export type CouncilSessionRow = typeof councilSessions.$inferSelect;
+
 /**
  * Idempotency guard for the webhook: Telegram redelivers the same update_id if
  * we don't 200 in time, so we record each processed id and skip duplicates
