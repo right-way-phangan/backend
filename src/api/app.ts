@@ -18,6 +18,7 @@ import { cors } from "hono/cors";
 import { createDb } from "../db/connect";
 import { getPublicObjects, getAllObjects } from "../lib/queries";
 import { recentObjectMatches } from "../lib/matching";
+import { toPublishable, formatPost, type PublishChannel, type PublishLang } from "../lib/publishable";
 import {
   createObject, updateObject, addObjectPhotos, replaceObjectContacts, ObjectInputError,
 } from "../lib/write";
@@ -182,6 +183,24 @@ app.get("/objects/:rw", async (c) => {
   const data = await getPublicObjects(db);
   const obj = data.find((o) => o.rwNumber === rw);
   return obj ? c.json(obj) : c.json({ error: "not found" }, 404);
+});
+
+/**
+ * Гейт качества перед публикацией: что именно безопасно уйдёт в канал.
+ * Берём из /objects/all (вкл. не-Active), чтобы гейт мог ОБЪЯСНИТЬ блокировку
+ * (статус/нет фото/Red flag), а не молча отдать 404. Powers /admin/publish и
+ * будущий серверный fan-out. Текст поста — канонический formatPost.
+ */
+app.get("/objects/:rw/publishable", async (c) => {
+  const rw = c.req.param("rw");
+  const channel = (c.req.query("channel") || "telegram") as PublishChannel;
+  const lang = (c.req.query("lang") === "ru" ? "ru" : "en") as PublishLang;
+  const all = await getAllObjects(db);
+  const obj = all.find((o) => o.rwNumber === rw);
+  if (!obj) return c.json({ error: "not found" }, 404);
+  const result = toPublishable(obj, { channel, lang });
+  const text = result.ok ? formatPost(result) : null;
+  return c.json({ result, text });
 });
 
 /** Create an object (website /admin/new + Telegram bot send NewObjectInput here). */
