@@ -37,6 +37,10 @@ import {
   updateArticle, deleteArticle, countPending, ArticleInputError,
 } from "../lib/articles";
 import {
+  createSocialPost, listSocialPosts, getSocialPostById, updateSocialPost,
+  countDraftPosts, SocialPostInputError,
+} from "../lib/social-posts";
+import {
   createTask as createAgentTask, listTasks as listAgentTasks,
   getTaskById as getAgentTaskById, countOpenTasks, updateTask as updateAgentTask,
   deleteTask as deleteAgentTask, createSession, requestCouncil, updateSession,
@@ -558,6 +562,52 @@ app.patch("/articles/:id", async (c) => {
 app.delete("/articles/:id", async (c) => {
   const ok = await deleteArticle(db, Number(c.req.param("id")));
   return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+
+// ─── Соц-посты: очередь черновиков Гермеса с гейтом (бот /пост → /посты) ───
+/** List posts. Query: ?status=draft|scheduled|published|rejected &limit= */
+app.get("/social-posts", async (c) => {
+  const status = c.req.query("status") as
+    | "draft" | "scheduled" | "published" | "rejected" | undefined;
+  const limitRaw = Number(c.req.query("limit"));
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : undefined;
+  return c.json(await listSocialPosts(db, { status, limit }));
+});
+
+app.get("/social-posts/draft-count", async (c) => {
+  return c.json({ count: await countDraftPosts(db) });
+});
+
+app.get("/social-posts/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isFinite(id)) return c.json({ error: "bad id" }, 400);
+  const row = await getSocialPostById(db, id);
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+
+/** Create one draft post (one language). Bot posts EN and RU separately. */
+app.post("/social-posts", async (c) => {
+  try {
+    const res = await createSocialPost(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof SocialPostInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /social-posts]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+
+/** Approve/schedule/reject/inline-edit. */
+app.patch("/social-posts/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isFinite(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const res = await updateSocialPost(db, id, await c.req.json());
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[PATCH /social-posts]", err);
+    return c.json({ error: "update failed" }, 500);
+  }
 });
 
 // ─── AI-команда: задачи (голос/текст/совет) + история советов ───

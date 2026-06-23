@@ -577,6 +577,39 @@ export type ArticleRow = typeof articles.$inferSelect;
 export type ArticleInsert = typeof articles.$inferInsert;
 
 // ============================================================
+// Соц-посты — очередь черновиков с гейтом. Гермес (rw-marketing, бот /пост) пишет
+// черновик пары EN+RU (status=draft); человек согласует/публикует (публикация в
+// канал держится до запуска — launch sequencing). Аналог articles, но короткий
+// формат (только текст), не для /blog. EN+RU связаны pairId. См. project_ai_council.
+// ============================================================
+
+export const socialPosts = pgTable(
+  "social_posts",
+  {
+    id: serial("id").primaryKey(),
+    pairId: text("pair_id").notNull(), // связывает EN+RU версии одного поста
+    lang: text("lang").notNull().default("en"),
+    channel: text("channel").notNull().default("telegram"),
+    topic: text("topic"), // внутренняя метка «о чём пост»
+    body: text("body").notNull(), // текст поста
+    status: text("status").notNull().default("draft"), // draft | scheduled | published | rejected
+    reviewerNote: text("reviewer_note"),
+    createdBy: text("created_by").notNull().default("germes"),
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    statusIdx: index("social_posts_status_idx").on(t.status),
+    pairIdx: index("social_posts_pair_idx").on(t.pairId),
+  }),
+);
+
+export type SocialPostRow = typeof socialPosts.$inferSelect;
+export type SocialPostInsert = typeof socialPosts.$inferInsert;
+
+// ============================================================
 // AI-команда: личный список задач (голос/текст/совет → задача) и история советов
 // консилиума. Источник правды переехал из локального JSONL бота в БД, чтобы
 // /admin/agents мог их показать (web на Vercel не видит локальные файлы бота).

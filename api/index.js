@@ -42,6 +42,7 @@ __export(schema_exports, {
   rateLimits: () => rateLimits,
   referralsDaily: () => referralsDaily,
   searchEvents: () => searchEvents,
+  socialPosts: () => socialPosts,
   stages: () => stages,
   users: () => users,
   valuationComps: () => valuationComps,
@@ -474,6 +475,32 @@ var articles = pgTable(
     statusIdx: index("articles_status_idx").on(t.status),
     langStatusIdx: index("articles_lang_status_idx").on(t.lang, t.status),
     slugLangIdx: uniqueIndex("articles_slug_lang_unique").on(t.slug, t.lang)
+  })
+);
+var socialPosts = pgTable(
+  "social_posts",
+  {
+    id: serial("id").primaryKey(),
+    pairId: text("pair_id").notNull(),
+    // связывает EN+RU версии одного поста
+    lang: text("lang").notNull().default("en"),
+    channel: text("channel").notNull().default("telegram"),
+    topic: text("topic"),
+    // внутренняя метка «о чём пост»
+    body: text("body").notNull(),
+    // текст поста
+    status: text("status").notNull().default("draft"),
+    // draft | scheduled | published | rejected
+    reviewerNote: text("reviewer_note"),
+    createdBy: text("created_by").notNull().default("germes"),
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({
+    statusIdx: index("social_posts_status_idx").on(t.status),
+    pairIdx: index("social_posts_pair_idx").on(t.pairId)
   })
 );
 var agentTasks = pgTable(
@@ -2292,8 +2319,55 @@ async function deleteArticle(db2, id) {
   return res.length > 0;
 }
 
+// src/lib/social-posts.ts
+import { eq as eq10, and as and4, desc as desc3 } from "drizzle-orm";
+var SocialPostInputError = class extends Error {
+};
+var STATUSES2 = ["draft", "scheduled", "published", "rejected"];
+async function createSocialPost(db2, input) {
+  const body = String(input.body ?? "").trim();
+  const pairId = String(input.pairId ?? "").trim();
+  if (!body) throw new SocialPostInputError("body is required");
+  if (!pairId) throw new SocialPostInputError("pairId is required");
+  const lang = input.lang === "ru" ? "ru" : "en";
+  const status = STATUSES2.includes(input.status) ? input.status : "draft";
+  const [row] = await db2.insert(socialPosts).values({
+    pairId,
+    lang,
+    channel: (input.channel || "telegram").trim() || "telegram",
+    topic: input.topic?.trim() || null,
+    body,
+    status
+  }).returning();
+  return row;
+}
+async function listSocialPosts(db2, opts = {}) {
+  const conds = [];
+  if (opts.status) conds.push(eq10(socialPosts.status, opts.status));
+  return db2.select().from(socialPosts).where(conds.length ? and4(...conds) : void 0).orderBy(desc3(socialPosts.createdAt)).limit(Math.min(Math.max(opts.limit ?? 50, 1), 200));
+}
+async function getSocialPostById(db2, id) {
+  const [row] = await db2.select().from(socialPosts).where(eq10(socialPosts.id, id)).limit(1);
+  return row ?? null;
+}
+async function updateSocialPost(db2, id, patch) {
+  const set = { updatedAt: /* @__PURE__ */ new Date() };
+  if (patch.status && STATUSES2.includes(patch.status)) {
+    set.status = patch.status;
+    if (patch.status === "published") set.publishedAt = /* @__PURE__ */ new Date();
+  }
+  if (typeof patch.reviewerNote === "string") set.reviewerNote = patch.reviewerNote;
+  if (typeof patch.body === "string" && patch.body.trim()) set.body = patch.body.trim();
+  const [row] = await db2.update(socialPosts).set(set).where(eq10(socialPosts.id, id)).returning();
+  return row ?? null;
+}
+async function countDraftPosts(db2) {
+  const rows = await db2.select({ id: socialPosts.id }).from(socialPosts).where(eq10(socialPosts.status, "draft"));
+  return rows.length;
+}
+
 // src/lib/agent-tasks.ts
-import { eq as eq10, desc as desc3 } from "drizzle-orm";
+import { eq as eq11, desc as desc4 } from "drizzle-orm";
 var AgentTaskInputError = class extends Error {
 };
 var TASK_STATUSES = ["open", "done"];
@@ -2304,14 +2378,14 @@ async function createTask(db2, input) {
   return row;
 }
 async function listTasks2(db2, opts = {}) {
-  return db2.select().from(agentTasks).where(opts.status ? eq10(agentTasks.status, opts.status) : void 0).orderBy(desc3(agentTasks.createdAt)).limit(opts.limit ?? 200);
+  return db2.select().from(agentTasks).where(opts.status ? eq11(agentTasks.status, opts.status) : void 0).orderBy(desc4(agentTasks.createdAt)).limit(opts.limit ?? 200);
 }
 async function getTaskById(db2, id) {
-  const [row] = await db2.select().from(agentTasks).where(eq10(agentTasks.id, id)).limit(1);
+  const [row] = await db2.select().from(agentTasks).where(eq11(agentTasks.id, id)).limit(1);
   return row ?? null;
 }
 async function countOpenTasks(db2) {
-  const rows = await db2.select({ id: agentTasks.id }).from(agentTasks).where(eq10(agentTasks.status, "open"));
+  const rows = await db2.select({ id: agentTasks.id }).from(agentTasks).where(eq11(agentTasks.status, "open"));
   return rows.length;
 }
 async function updateTask2(db2, id, patch) {
@@ -2326,11 +2400,11 @@ async function updateTask2(db2, id, patch) {
     set.text = t;
   }
   if (Object.keys(set).length === 0) return getTaskById(db2, id);
-  const [row] = await db2.update(agentTasks).set(set).where(eq10(agentTasks.id, id)).returning();
+  const [row] = await db2.update(agentTasks).set(set).where(eq11(agentTasks.id, id)).returning();
   return row ?? null;
 }
 async function deleteTask(db2, id) {
-  const res = await db2.delete(agentTasks).where(eq10(agentTasks.id, id)).returning({ id: agentTasks.id });
+  const res = await db2.delete(agentTasks).where(eq11(agentTasks.id, id)).returning({ id: agentTasks.id });
   return res.length > 0;
 }
 async function createSession(db2, input) {
@@ -2361,19 +2435,19 @@ async function updateSession(db2, id, patch) {
   if (patch.answer !== void 0) set.answer = patch.answer;
   if (patch.errorText !== void 0) set.errorText = patch.errorText;
   if (Object.keys(set).length === 0) return getSessionById(db2, id);
-  const [row] = await db2.update(councilSessions).set(set).where(eq10(councilSessions.id, id)).returning();
+  const [row] = await db2.update(councilSessions).set(set).where(eq11(councilSessions.id, id)).returning();
   return row ?? null;
 }
 async function listSessions(db2, opts = {}) {
-  return db2.select().from(councilSessions).where(opts.status ? eq10(councilSessions.status, opts.status) : void 0).orderBy(desc3(councilSessions.createdAt)).limit(opts.limit ?? 20);
+  return db2.select().from(councilSessions).where(opts.status ? eq11(councilSessions.status, opts.status) : void 0).orderBy(desc4(councilSessions.createdAt)).limit(opts.limit ?? 20);
 }
 async function getSessionById(db2, id) {
-  const [row] = await db2.select().from(councilSessions).where(eq10(councilSessions.id, id)).limit(1);
+  const [row] = await db2.select().from(councilSessions).where(eq11(councilSessions.id, id)).limit(1);
   return row ?? null;
 }
 
 // src/lib/contact-bot.ts
-import { eq as eq11 } from "drizzle-orm";
+import { eq as eq12 } from "drizzle-orm";
 var SITE2 = "https://rightwaygroup.co";
 var FLOOD_WINDOW_MS = 6e4;
 var FLOOD_MAX = 16;
@@ -2425,7 +2499,7 @@ async function handleContactUpdate(db2, update, cfg) {
   if (!msg || !msg.from || msg.from.is_bot) return;
   if (msg.from.id === cfg.ownerId) {
     if (!msg.reply_to_message) return;
-    const rows = await db2.select().from(contactThreads).where(eq11(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
+    const rows = await db2.select().from(contactThreads).where(eq12(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
     const thread = rows[0];
     if (!thread) {
       await tg(cfg, "sendMessage", {
@@ -2467,7 +2541,7 @@ async function handleContactUpdate(db2, update, cfg) {
       return;
     }
   }
-  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq11(contactThreads.clientChatId, msg.chat.id));
+  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq12(contactThreads.clientChatId, msg.chat.id));
   const firstContact = history.length === 0;
   const cutoff = new Date(Date.now() - FLOOD_WINDOW_MS);
   const recent = history.filter((h2) => h2.createdAt > cutoff).length;
@@ -2534,7 +2608,7 @@ ${problems.join("\n")}`,
 }
 
 // src/lib/valuation.ts
-import { eq as eq12, desc as desc4 } from "drizzle-orm";
+import { eq as eq13, desc as desc5 } from "drizzle-orm";
 var ValuationInputError = class extends Error {
 };
 async function listFactorOverrides(db2) {
@@ -2545,7 +2619,7 @@ async function setFactorOverrides(db2, entries) {
     const key = String(e.key ?? "").trim();
     if (!key) throw new ValuationInputError("factor key is required");
     if (e.value === null) {
-      await db2.delete(valuationFactors).where(eq12(valuationFactors.key, key));
+      await db2.delete(valuationFactors).where(eq13(valuationFactors.key, key));
       continue;
     }
     const value = Number(e.value);
@@ -2559,7 +2633,7 @@ async function setFactorOverrides(db2, entries) {
 var COMP_TYPES = ["Land", "Villa", "House", "Apartment"];
 var COMP_STATUSES = ["active", "sold", "gone"];
 async function listComps(db2) {
-  return db2.select().from(valuationComps).orderBy(desc4(valuationComps.createdAt));
+  return db2.select().from(valuationComps).orderBy(desc5(valuationComps.createdAt));
 }
 async function addComp(db2, input) {
   const priceThb = Number(input.priceThb);
@@ -2604,11 +2678,11 @@ async function updateComp(db2, id, patch) {
   }
   if (patch.note !== void 0) set.note = patch.note?.trim() || null;
   if (Object.keys(set).length === 0) return null;
-  const [row] = await db2.update(valuationComps).set(set).where(eq12(valuationComps.id, id)).returning();
+  const [row] = await db2.update(valuationComps).set(set).where(eq13(valuationComps.id, id)).returning();
   return row ?? null;
 }
 async function deleteComp(db2, id) {
-  const rows = await db2.delete(valuationComps).where(eq12(valuationComps.id, id)).returning();
+  const rows = await db2.delete(valuationComps).where(eq13(valuationComps.id, id)).returning();
   return rows.length > 0;
 }
 async function logValuation(db2, input) {
@@ -2630,7 +2704,7 @@ async function logValuation(db2, input) {
   return row;
 }
 async function listValuations(db2, limit = 20) {
-  return db2.select().from(valuations).orderBy(desc4(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
+  return db2.select().from(valuations).orderBy(desc5(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
 }
 
 // src/lib/ratelimit.ts
@@ -3017,6 +3091,42 @@ app.patch("/articles/:id", async (c) => {
 app.delete("/articles/:id", async (c) => {
   const ok = await deleteArticle(db, Number(c.req.param("id")));
   return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+app.get("/social-posts", async (c) => {
+  const status = c.req.query("status");
+  const limitRaw = Number(c.req.query("limit"));
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : void 0;
+  return c.json(await listSocialPosts(db, { status, limit }));
+});
+app.get("/social-posts/draft-count", async (c) => {
+  return c.json({ count: await countDraftPosts(db) });
+});
+app.get("/social-posts/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isFinite(id)) return c.json({ error: "bad id" }, 400);
+  const row = await getSocialPostById(db, id);
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+app.post("/social-posts", async (c) => {
+  try {
+    const res = await createSocialPost(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof SocialPostInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /social-posts]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+app.patch("/social-posts/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isFinite(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const res = await updateSocialPost(db, id, await c.req.json());
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[PATCH /social-posts]", err);
+    return c.json({ error: "update failed" }, 500);
+  }
 });
 app.get("/agent-tasks", async (c) => {
   const status = c.req.query("status");
