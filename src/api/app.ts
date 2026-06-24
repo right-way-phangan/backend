@@ -16,7 +16,7 @@ import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createDb } from "../db/connect";
-import { getPublicObjects, getAllObjects } from "../lib/queries";
+import { getPublicObjects, getAllObjects, scanPhotosForDocuments, purgePhotosByUrl } from "../lib/queries";
 import { recentObjectMatches } from "../lib/matching";
 import { toPublishable, formatPost, type PublishChannel, type PublishLang } from "../lib/publishable";
 import {
@@ -237,6 +237,44 @@ app.post("/objects/:rw/photos", async (c) => {
   } catch (err) {
     console.error("[POST /objects/:rw/photos]", err);
     return c.json({ error: "add photos failed" }, 500);
+  }
+});
+
+/**
+ * Verification system — re-scan public photos for leaked internal documents.
+ * Powers /admin/photo-audit. Body: { rwNumbers?, activeOnly?, limit? }.
+ * Gefest (sysadmin/security) owns this surface.
+ */
+app.post("/photos/audit", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const res = await scanPhotosForDocuments(db, {
+      rwNumbers: Array.isArray(body.rwNumbers) ? body.rwNumbers : undefined,
+      activeOnly: body.activeOnly !== false, // default: only public-eligible photos
+      limit: typeof body.limit === "number" ? body.limit : undefined,
+    });
+    return c.json(res);
+  } catch (err) {
+    console.error("[POST /photos/audit]", err);
+    return c.json({ error: "audit failed" }, 500);
+  }
+});
+
+/**
+ * Remove photos by URL (audit "remove" action). Deletes the object_photos rows so
+ * the site stops showing them immediately (cover re-derives). The R2 blob stays
+ * publicly fetchable until purged separately — `stillNeedsBlobPurge` lists the
+ * keys; run scripts/clean-leaked-doc-photos + delete_r2_blobs to kill the files.
+ */
+app.post("/photos/purge", async (c) => {
+  try {
+    const { urls } = await c.req.json();
+    const list = Array.isArray(urls) ? urls : [];
+    const res = await purgePhotosByUrl(db, list);
+    return c.json({ ...res, stillNeedsBlobPurge: list });
+  } catch (err) {
+    console.error("[POST /photos/purge]", err);
+    return c.json({ error: "purge failed" }, 500);
   }
 });
 
