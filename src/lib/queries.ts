@@ -2,10 +2,80 @@
  * Read queries — the own-DB equivalents of web/src/lib/data/objects.ts.
  * Driver-agnostic (takes any drizzle db). At ~80 rows we assemble in JS.
  */
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { objects, objectPhotos, objectDocs, objectContacts, projectUnits } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
 import { toDomain, sortByRecentAndPremium, type RealEstateObject, type ObjectContact } from "./domain";
+import { vetImageUrls, isVettingEnabled, type DocKind } from "./photo-vetting";
+
+export interface FlaggedPhoto {
+  rwNumber: string;
+  status: string;
+  url: string;
+  kind?: DocKind;
+  confidence?: "high" | "med" | "low";
+  reason?: string;
+}
+
+/**
+ * Verification system ("система проверки"): re-scan public photos for internal
+ * documents that slipped past the intake guard. Powers /admin/photo-audit.
+ * Bounded by `limit` (cost: one vision call per photo). When no API key, returns
+ * enabled:false so the UI can explain that the scanner is dormant.
+ */
+export async function scanPhotosForDocuments(
+  db: AnyPgDatabase,
+  opts: { rwNumbers?: string[]; activeOnly?: boolean; limit?: number } = {},
+): Promise<{ enabled: boolean; scanned: number; flagged: FlaggedPhoto[] }> {
+  if (!isVettingEnabled()) return { enabled: false, scanned: 0, flagged: [] };
+  const limit = Math.min(opts.limit ?? 250, 1000);
+  const rows = await db
+    .select({ rwNumber: objects.rwNumber, status: objects.status, url: objectPhotos.url })
+    .from(objectPhotos)
+    .innerJoin(objects, eq(objectPhotos.objectId, objects.id));
+  let pool = rows.filter((r) => r.rwNumber);
+  if (opts.activeOnly) pool = pool.filter((r) => r.status === "Active");
+  if (opts.rwNumbers?.length) {
+    const set = new Set(opts.rwNumbers);
+    pool = pool.filter((r) => set.has(r.rwNumber as string));
+  }
+  pool = pool.slice(0, limit);
+  const verdicts = await vetImageUrls(pool.map((r) => r.url));
+  const flagged: FlaggedPhoto[] = [];
+  verdicts.forEach((v, i) => {
+    if (v.checked && v.isDocument) {
+      flagged.push({
+        rwNumber: pool[i].rwNumber as string,
+        status: pool[i].status,
+        url: v.url,
+        kind: v.kind,
+        confidence: v.confidence,
+        reason: v.reason,
+      });
+    }
+  });
+  return { enabled: true, scanned: pool.length, flagged };
+}
+
+/** Remove photo rows by URL (admin audit "remove" action). Cover/gallery re-derive. */
+export async function purgePhotosByUrl(
+  db: AnyPgDatabase,
+  urls: string[],
+): Promise<{ removed: number; objectsTouched: number }> {
+  const clean = [...new Set(urls.map((u) => String(u).trim()).filter(Boolean))];
+  if (!clean.length) return { removed: 0, objectsTouched: 0 };
+  const hits = await db
+    .select({ id: objectPhotos.id, objectId: objectPhotos.objectId })
+    .from(objectPhotos)
+    .where(inArray(objectPhotos.url, clean));
+  if (!hits.length) return { removed: 0, objectsTouched: 0 };
+  await db.delete(objectPhotos).where(inArray(objectPhotos.url, clean));
+  const touched = [...new Set(hits.map((h) => h.objectId))];
+  for (const id of touched) {
+    await db.update(objects).set({ updatedAt: new Date() }).where(eq(objects.id, id));
+  }
+  return { removed: hits.length, objectsTouched: touched.length };
+}
 
 async function assembleAll(db: AnyPgDatabase): Promise<RealEstateObject[]> {
   const [objs, phs, dcs, cts] = await Promise.all([

@@ -9,6 +9,7 @@
  */
 import { eq, sql } from "drizzle-orm";
 import { objects, objectPhotos, objectDocs, objectContacts } from "../db/schema";
+import { partitionByVetting, type VetVerdict } from "./photo-vetting";
 import type { ObjectInsert } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
 import { generateObjectTitle, type TitleAttrs } from "./object-title";
@@ -131,6 +132,8 @@ export interface CreateObjectResult {
   rwNumber: string;
   id: number;
   url: string;
+  /** Photos rejected by the vetting gate (documents) — never added to PHOTOS. */
+  rejectedPhotos?: VetVerdict[];
 }
 
 // ---- RW numbering (CLAUDE.md scheme) ----
@@ -465,11 +468,17 @@ export async function createObject(
     }
   }
 
+  // Vet photos BEFORE the transaction (vision calls are network I/O — never hold
+  // a DB tx open across them). Documents are dropped from PHOTOS, never published.
+  const photoVet = input.photoUrls?.length
+    ? await partitionByVetting(input.photoUrls)
+    : { accepted: [] as string[], rejected: [] as VetVerdict[] };
+
   const id = await db.transaction(async (tx: AnyPgDatabase) => {
     const [obj] = await tx.insert(objects).values(row).returning({ id: objects.id });
-    if (input.photoUrls?.length) {
+    if (photoVet.accepted.length) {
       await tx.insert(objectPhotos).values(
-        input.photoUrls.map((url, i) => ({ objectId: obj.id, url, sort: i, isCover: i === 0 })),
+        photoVet.accepted.map((url, i) => ({ objectId: obj.id, url, sort: i, isCover: i === 0 })),
       );
     }
     if (input.docUrls?.length) {
@@ -491,7 +500,12 @@ export async function createObject(
   });
 
   const base = process.env.SITE_BASE_URL ?? "";
-  return { rwNumber, id, url: `${base}/object/${rwNumber}` };
+  return {
+    rwNumber,
+    id,
+    url: `${base}/object/${rwNumber}`,
+    rejectedPhotos: photoVet.rejected.length ? photoVet.rejected : undefined,
+  };
 }
 
 /**
@@ -505,14 +519,23 @@ export async function addObjectPhotos(
   db: AnyPgDatabase,
   rwNumber: string,
   urls: string[],
-): Promise<{ rwNumber: string; added: number; coverSet: boolean } | null> {
+): Promise<{
+  rwNumber: string;
+  added: number;
+  coverSet: boolean;
+  rejected: VetVerdict[];
+} | null> {
   const clean = urls.map((u) => String(u).trim()).filter((u) => /^https?:\/\//i.test(u));
   const [obj] = await db
     .select({ id: objects.id })
     .from(objects)
     .where(eq(objects.rwNumber, rwNumber));
   if (!obj) return null;
-  if (clean.length === 0) return { rwNumber, added: 0, coverSet: false };
+  if (clean.length === 0) return { rwNumber, added: 0, coverSet: false, rejected: [] };
+
+  // Vetting gate: documents (chanote/pricelist/screenshot/…) never reach PHOTOS.
+  const { accepted, rejected } = await partitionByVetting(clean);
+  if (accepted.length === 0) return { rwNumber, added: 0, coverSet: false, rejected };
 
   const existing = await db
     .select({ sort: objectPhotos.sort })
@@ -522,7 +545,7 @@ export async function addObjectPhotos(
   const startSort = existing.reduce((m, r) => Math.max(m, r.sort + 1), 0);
 
   await db.insert(objectPhotos).values(
-    clean.map((url, i) => ({
+    accepted.map((url, i) => ({
       objectId: obj.id,
       url,
       sort: startSort + i,
@@ -530,7 +553,7 @@ export async function addObjectPhotos(
     })),
   );
   await db.update(objects).set({ updatedAt: new Date() }).where(eq(objects.id, obj.id));
-  return { rwNumber, added: clean.length, coverSet: !hadPhotos };
+  return { rwNumber, added: accepted.length, coverSet: !hadPhotos, rejected };
 }
 
 /** Whitelisted scalar columns the PATCH endpoint may set (bot /edit, CRM UI). */

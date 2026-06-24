@@ -663,7 +663,7 @@ async function createDb() {
 }
 
 // src/lib/queries.ts
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 // src/lib/domain.ts
 var u = (v) => v == null ? void 0 : v;
@@ -768,7 +768,156 @@ function sortByRecentAndPremium(a, b) {
   return (b.dateAdded ?? "").localeCompare(a.dateAdded ?? "");
 }
 
+// src/lib/photo-vetting.ts
+var API_URL = "https://api.anthropic.com/v1/messages";
+var MODEL = process.env.PHOTO_VET_MODEL ?? "claude-opus-4-8";
+var VET_CONCURRENCY = Number(process.env.PHOTO_VET_CONCURRENCY ?? 4);
+function isVettingEnabled() {
+  return !!process.env.ANTHROPIC_API_KEY;
+}
+var SYSTEM_PROMPT = `\u0422\u044B \u043A\u043B\u0430\u0441\u0441\u0438\u0444\u0438\u0446\u0438\u0440\u0443\u0435\u0448\u044C \u043E\u0434\u043D\u043E \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u0435 \u0438\u0437 \u0433\u0430\u043B\u0435\u0440\u0435\u0438 \u043E\u0431\u044A\u0435\u043A\u0442\u0430 \u043D\u0435\u0434\u0432\u0438\u0436\u0438\u043C\u043E\u0441\u0442\u0438 (\u043E\u0441\u0442\u0440\u043E\u0432 \u041F\u0430\u043D\u0433\u0430\u043D, \u0422\u0430\u0438\u043B\u0430\u043D\u0434). \u0420\u0435\u0448\u0438, \u044D\u0442\u043E \u0420\u0415\u0410\u041B\u042C\u041D\u041E\u0415 \u0444\u043E\u0442\u043E \u043D\u0435\u0434\u0432\u0438\u0436\u0438\u043C\u043E\u0441\u0442\u0438 \u0438\u043B\u0438 \u0412\u041D\u0423\u0422\u0420\u0415\u041D\u041D\u0418\u0419 \u0414\u041E\u041A\u0423\u041C\u0415\u041D\u0422, \u043A\u043E\u0442\u043E\u0440\u044B\u0439 \u043D\u0435\u043B\u044C\u0437\u044F \u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C.
+
+\u0414\u041E\u041A\u0423\u041C\u0415\u041D\u0422 (isDocument=true) \u2014 \u043B\u044E\u0431\u043E\u0435 \u0438\u0437:
+- \u0442\u0430\u0439\u0441\u043A\u0438\u0439 \u0447\u0430\u043D\u043E\u0442 / \u0442\u0438\u0442\u0443\u043B / NS3K (\u0433\u0435\u0440\u0431 \u0413\u0430\u0440\u0443\u0434\u0430, \u043D\u043E\u043C\u0435\u0440\u0430 \u0434\u0435\u0435\u0434\u043E\u0432, \u043F\u0435\u0447\u0430\u0442\u0438);
+- \u043C\u0435\u0436\u0435\u0432\u043E\u0439 / \u043A\u0430\u0434\u0430\u0441\u0442\u0440\u043E\u0432\u044B\u0439 \u043F\u043B\u0430\u043D, \u0437\u0435\u043C\u043B\u0435\u0443\u0441\u0442\u0440\u043E\u0438\u0442\u0435\u043B\u044C\u043D\u0430\u044F \u0441\u044A\u0451\u043C\u043A\u0430;
+- \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u0433\u043E\u0441-\u0413\u0418\u0421 LandsMaps / DOL / cityplan (\u043A\u0430\u0440\u0442\u0430 \u0441 \u043D\u043E\u043C\u0435\u0440\u0430\u043C\u0438 \u0443\u0447\u0430\u0441\u0442\u043A\u043E\u0432, \u043A\u043E\u043E\u0440\u0434\u0438\u043D\u0430\u0442\u0430\u043C\u0438, \u0433\u043E\u0441-\u043E\u0446\u0435\u043D\u043A\u043E\u0439);
+- \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u0442\u0430\u0431\u043B\u0438\u0446\u044B / \u043F\u0440\u0430\u0439\u0441\u0430 Google Sheets \u0438\u043B\u0438 Excel (\u0446\u0435\u043D\u044B, \xAB\u0446\u0435\u043D\u0430 \u0437\u0430 \u0440\u0430\u0439\xBB, \u043A\u043E\u043C\u0438\u0441\u0441\u0438\u044F);
+- \u0441\u043A\u0430\u043D \u0434\u043E\u0433\u043E\u0432\u043E\u0440\u0430 / \u044E\u0440\u0438\u0434\u0438\u0447\u0435\u0441\u043A\u043E\u0433\u043E \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430;
+- \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u043F\u0435\u0440\u0435\u043F\u0438\u0441\u043A\u0438 (LINE / WhatsApp / Telegram), \u0441\u043A\u0440\u0438\u043D \u0443\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u044F;
+- \u0443\u0434\u043E\u0441\u0442\u043E\u0432\u0435\u0440\u0435\u043D\u0438\u0435 \u043B\u0438\u0447\u043D\u043E\u0441\u0442\u0438 / \u043F\u0430\u0441\u043F\u043E\u0440\u0442;
+- \u043B\u044E\u0431\u043E\u0439 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u044D\u043A\u0440\u0430\u043D\u0430 \u0438\u043B\u0438 \u0441\u043A\u0430\u043D \u0442\u0435\u043A\u0441\u0442\u0430/\u0446\u0438\u0444\u0440, \u0430 \u043D\u0435 \u0444\u0438\u0437\u0438\u0447\u0435\u0441\u043A\u043E\u0433\u043E \u043E\u0431\u044A\u0435\u043A\u0442\u0430.
+
+\u0420\u0415\u0410\u041B\u042C\u041D\u041E\u0415 \u0424\u041E\u0422\u041E (isDocument=false) \u2014 \u0437\u0435\u043C\u043B\u044F/\u0434\u0436\u0443\u043D\u0433\u043B\u0438/\u0443\u0447\u0430\u0441\u0442\u043E\u043A/\u0434\u043E\u0440\u043E\u0433\u0430/\u0432\u0438\u0434, \u0430\u044D\u0440\u043E/\u0434\u0440\u043E\u043D (\u0434\u0430\u0436\u0435 \u0441 \u043D\u0430\u0440\u0438\u0441\u043E\u0432\u0430\u043D\u043D\u044B\u043C \u043E\u0442 \u0440\u0443\u043A\u0438 \u043A\u043E\u043D\u0442\u0443\u0440\u043E\u043C \u0443\u0447\u0430\u0441\u0442\u043A\u0430), \u0432\u0438\u043B\u043B\u0430/\u0434\u043E\u043C \u0441\u043D\u0430\u0440\u0443\u0436\u0438 \u0438 \u0432\u043D\u0443\u0442\u0440\u0438, \u0431\u0430\u0441\u0441\u0435\u0439\u043D, \u043C\u043E\u0440\u0435, \u0430\u0440\u0445\u0438\u0442\u0435\u043A\u0442\u0443\u0440\u043D\u044B\u0435 \u0440\u0435\u043D\u0434\u0435\u0440\u044B \u0438 \u043C\u0430\u0440\u043A\u0435\u0442\u0438\u043D\u0433\u043E\u0432\u044B\u0435 \u043F\u043B\u0430\u043D\u0438\u0440\u043E\u0432\u043A\u0438/\u043C\u0430\u0441\u0442\u0435\u0440-\u043F\u043B\u0430\u043D\u044B \u043F\u0440\u043E\u0435\u043A\u0442\u043E\u0432.
+
+\u0421\u043E\u043C\u043D\u0435\u0432\u0430\u0435\u0448\u044C\u0441\u044F \u2014 confidence:"low". \u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u0441\u043F\u0443\u0442\u043D\u0438\u043A\u0430 \u0441 \u041D\u0410\u041B\u041E\u0416\u0415\u041D\u041D\u042B\u041C\u0418 \u043F\u0440\u043E\u043C\u0435\u0440\u0430\u043C\u0438 \u0441\u0442\u043E\u0440\u043E\u043D/\u0433\u0440\u0430\u043D\u0438\u0446\u0430\u043C\u0438/\u043A\u043E\u043E\u0440\u0434\u0438\u043D\u0430\u0442\u0430\u043C\u0438 \u2014 \u044D\u0442\u043E \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442.
+
+\u041E\u0442\u0432\u0435\u0442\u044C \u0421\u0422\u0420\u041E\u0413\u041E \u043E\u0434\u043D\u0438\u043C JSON-\u043E\u0431\u044A\u0435\u043A\u0442\u043E\u043C \u0431\u0435\u0437 \u043F\u043E\u044F\u0441\u043D\u0435\u043D\u0438\u0439:
+{"isDocument": true|false, "kind": "chanote|survey|pricelist|spreadsheet|contract|chat|govUI|id|otherDoc|none", "confidence": "high|med|low", "reason": "\u043A\u0440\u0430\u0442\u043A\u043E"}`;
+function parseVerdict(url, text2) {
+  const m = text2.match(/\{[\s\S]*\}/);
+  if (!m) return { url, checked: true, isDocument: false, reason: "no JSON in response" };
+  try {
+    const o = JSON.parse(m[0]);
+    const kind = o.kind && o.kind !== "none" ? o.kind : void 0;
+    const confidence = o.confidence === "high" || o.confidence === "med" || o.confidence === "low" ? o.confidence : void 0;
+    return {
+      url,
+      checked: true,
+      isDocument: !!o.isDocument,
+      kind,
+      confidence,
+      reason: o.reason
+    };
+  } catch {
+    return { url, checked: true, isDocument: false, reason: "unparseable JSON" };
+  }
+}
+async function vetImageUrl(url) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { url, checked: false, isDocument: false };
+  try {
+    const resp = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 200,
+        system: SYSTEM_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: { type: "url", url } },
+              { type: "text", text: "\u041A\u043B\u0430\u0441\u0441\u0438\u0444\u0438\u0446\u0438\u0440\u0443\u0439 \u044D\u0442\u043E \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u0435." }
+            ]
+          }
+        ]
+      })
+    });
+    if (!resp.ok) {
+      console.error(`[photo-vetting] anthropic ${resp.status} for ${url}`);
+      return { url, checked: false, isDocument: false };
+    }
+    const data = await resp.json();
+    const text2 = (data.content ?? []).map((c) => c.text ?? "").join(" ");
+    return parseVerdict(url, text2);
+  } catch (err) {
+    console.error("[photo-vetting] call failed:", err);
+    return { url, checked: false, isDocument: false };
+  }
+}
+async function vetImageUrls(urls) {
+  if (!urls.length) return [];
+  if (!isVettingEnabled()) return urls.map((url) => ({ url, checked: false, isDocument: false }));
+  const out = new Array(urls.length);
+  let next = 0;
+  async function worker() {
+    while (next < urls.length) {
+      const i = next++;
+      out[i] = await vetImageUrl(urls[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(VET_CONCURRENCY, urls.length) }, worker));
+  return out;
+}
+function isBlockingDocument(v) {
+  return v.checked && v.isDocument && v.confidence !== "low";
+}
+async function partitionByVetting(urls) {
+  const verdicts = await vetImageUrls(urls);
+  const accepted = [];
+  const rejected = [];
+  for (const v of verdicts) {
+    if (isBlockingDocument(v)) rejected.push(v);
+    else accepted.push(v.url);
+  }
+  return { accepted, rejected, verdicts };
+}
+
 // src/lib/queries.ts
+async function scanPhotosForDocuments(db2, opts = {}) {
+  if (!isVettingEnabled()) return { enabled: false, scanned: 0, flagged: [] };
+  const limit = Math.min(opts.limit ?? 250, 1e3);
+  const rows = await db2.select({ rwNumber: objects.rwNumber, status: objects.status, url: objectPhotos.url }).from(objectPhotos).innerJoin(objects, eq(objectPhotos.objectId, objects.id));
+  let pool = rows.filter((r) => r.rwNumber);
+  if (opts.activeOnly) pool = pool.filter((r) => r.status === "Active");
+  if (opts.rwNumbers?.length) {
+    const set = new Set(opts.rwNumbers);
+    pool = pool.filter((r) => set.has(r.rwNumber));
+  }
+  pool = pool.slice(0, limit);
+  const verdicts = await vetImageUrls(pool.map((r) => r.url));
+  const flagged = [];
+  verdicts.forEach((v, i) => {
+    if (v.checked && v.isDocument) {
+      flagged.push({
+        rwNumber: pool[i].rwNumber,
+        status: pool[i].status,
+        url: v.url,
+        kind: v.kind,
+        confidence: v.confidence,
+        reason: v.reason
+      });
+    }
+  });
+  return { enabled: true, scanned: pool.length, flagged };
+}
+async function purgePhotosByUrl(db2, urls) {
+  const clean2 = [...new Set(urls.map((u2) => String(u2).trim()).filter(Boolean))];
+  if (!clean2.length) return { removed: 0, objectsTouched: 0 };
+  const hits = await db2.select({ id: objectPhotos.id, objectId: objectPhotos.objectId }).from(objectPhotos).where(inArray(objectPhotos.url, clean2));
+  if (!hits.length) return { removed: 0, objectsTouched: 0 };
+  await db2.delete(objectPhotos).where(inArray(objectPhotos.url, clean2));
+  const touched = [...new Set(hits.map((h2) => h2.objectId))];
+  for (const id of touched) {
+    await db2.update(objects).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq(objects.id, id));
+  }
+  return { removed: hits.length, objectsTouched: touched.length };
+}
 async function assembleAll(db2) {
   const [objs, phs, dcs, cts] = await Promise.all([
     db2.select().from(objects),
@@ -1329,6 +1478,229 @@ async function recentObjectMatches(db2, hours = 24) {
   return out.sort((a, b) => b.matchCount - a.matchCount);
 }
 
+// src/lib/publishable.ts
+var ConfidentialLeakError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ConfidentialLeakError";
+  }
+};
+var VETTED_STATUSES = /* @__PURE__ */ new Set(["vetted", "full dd"]);
+var DESC_MAX = 500;
+var DEFAULT_SITE = "https://rightwaygroup.co";
+var TYPE_LABEL_RU = {
+  Land: "\u0417\u0435\u043C\u043B\u044F",
+  Villa: "\u0412\u0438\u043B\u043B\u0430",
+  House: "\u0414\u043E\u043C",
+  Apartment: "\u0410\u043F\u0430\u0440\u0442\u0430\u043C\u0435\u043D\u0442\u044B",
+  Townhouse: "\u0422\u0430\u0443\u043D\u0445\u0430\u0443\u0441",
+  Hotel: "\u041E\u0442\u0435\u043B\u044C",
+  Business: "\u0411\u0438\u0437\u043D\u0435\u0441",
+  Project: "\u041F\u0440\u043E\u0435\u043A\u0442",
+  Unit: "\u042E\u043D\u0438\u0442"
+};
+var TYPE_EMOJI = {
+  Land: "\u{1F3DD}",
+  Villa: "\u{1F3E1}",
+  House: "\u{1F3E0}",
+  Apartment: "\u{1F3E2}",
+  Townhouse: "\u{1F3D8}",
+  Project: "\u{1F3D7}"
+};
+function typeLabel(type, lang) {
+  return lang === "ru" ? TYPE_LABEL_RU[type] ?? type : type;
+}
+function tenureLabel(tenure, lang) {
+  if (!tenure || !tenure.length) return void 0;
+  const set = new Set(tenure.map((t) => t.toLowerCase()));
+  const lease = set.has("leasehold");
+  const free = set.has("freehold");
+  if (lease && free) return lang === "ru" ? "\u0424\u0440\u0438\u0445\u043E\u043B\u0434 / \u043B\u0438\u0437\u0445\u043E\u043B\u0434 (\u0432\u0430\u0440\u0438\u0430\u043D\u0442\u044B)" : "Freehold / leasehold options";
+  if (lease) return lang === "ru" ? "\u041B\u0438\u0437\u0445\u043E\u043B\u0434 (\u0434\u043E\u043B\u0433\u043E\u0441\u0440\u043E\u0447\u043D\u0430\u044F \u0430\u0440\u0435\u043D\u0434\u0430)" : "Leasehold (long-term lease)";
+  if (free) return lang === "ru" ? "\u0424\u0440\u0438\u0445\u043E\u043B\u0434" : "Freehold";
+  return tenure.join(", ");
+}
+var FEATURE_LABELS = [
+  { key: "beachfront", en: "\u{1F3D6} Beachfront", ru: "\u{1F3D6} \u041F\u0435\u0440\u0432\u0430\u044F \u043B\u0438\u043D\u0438\u044F" },
+  { key: "seaView", en: "\u{1F30A} Sea view", ru: "\u{1F30A} \u0412\u0438\u0434 \u043D\u0430 \u043C\u043E\u0440\u0435" },
+  { key: "mountainView", en: "\u26F0 Mountain view", ru: "\u26F0 \u0412\u0438\u0434 \u043D\u0430 \u0433\u043E\u0440\u044B" },
+  { key: "jungleView", en: "\u{1F334} Jungle view", ru: "\u{1F334} \u0412\u0438\u0434 \u043D\u0430 \u0434\u0436\u0443\u043D\u0433\u043B\u0438" },
+  { key: "flatLand", en: "\u{1F4D0} Flat land", ru: "\u{1F4D0} \u0420\u043E\u0432\u043D\u044B\u0439 \u0443\u0447\u0430\u0441\u0442\u043E\u043A" },
+  { key: "pool", en: "\u{1F3CA} Pool", ru: "\u{1F3CA} \u0411\u0430\u0441\u0441\u0435\u0439\u043D" },
+  { key: "quiet", en: "\u{1F92B} Quiet", ru: "\u{1F92B} \u0422\u0438\u0445\u043E" },
+  { key: "electricity", en: "\u26A1\uFE0F Electricity", ru: "\u26A1\uFE0F \u042D\u043B\u0435\u043A\u0442\u0440\u0438\u0447\u0435\u0441\u0442\u0432\u043E" }
+];
+var CYRILLIC_RE = /[А-Яа-яЁё]/;
+var CONTACT_LINE_RE = /(\+?\d[\d\-\s().]{7,}\d)|line\s*id|line\s*:|whats\s*app|wa\.me|t\.me\/|telegram\s*[:@]|viber|\bimo\b|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|@[a-z0-9_]{4,}/i;
+var REDACT_DEED = /\b(chanote|чанот[а-я]*|title\s*deed)\b([^.,;)\n]{0,20}?)\b(?:no\.?|number|№|#|deed\s*no\.?|เลขที่)\s*#?\s*\d{3,}[/\d-]*/gi;
+var REDACT_COMMISSION = /\b(?:commission|комисси[яюейи])\b[\s:–-]*\d{0,2}(?:\.\d+)?\s*%?|(?:\d{1,2}(?:\.\d+)?\s*%)\s*(?:commission|комисс\w*)/gi;
+var REDACT_PRICELIST = /[^.\n]*(?:расчётн\w*\s+лист|developer'?s?\s+price\s*list|прайс[\s-]*лист\s+застройщ\w*)[^.\n]*/gi;
+var HARD_CONFIDENTIAL = [
+  { re: /\b(commission|комисси[яюейи])\b[\s:–-]*\d{1,2}(\.\d+)?\s*%/i, label: "\u043A\u043E\u043C\u0438\u0441\u0441\u0438\u044F" },
+  { re: /(\d{1,2}(\.\d+)?\s*%)\s*(commission|комисс)/i, label: "\u043A\u043E\u043C\u0438\u0441\u0441\u0438\u044F %" },
+  { re: /\b(chanote|чанот[а-я]*|title\s*deed)\b[^.\n]{0,20}?\b(no\.?|number|№|#|deed\s*no\.?|เลขที่)\s*#?\s*\d{3,}/i, label: "\u043D\u043E\u043C\u0435\u0440 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430" },
+  { re: /(расчётн\w*\s+лист|developer'?s?\s+price\s*list|прайс[\s-]*лист\s+застройщ)/i, label: "\u043F\u0440\u0430\u0439\u0441-\u043B\u0438\u0441\u0442 \u0437\u0430\u0441\u0442\u0440\u043E\u0439\u0449\u0438\u043A\u0430" }
+];
+function fmtThb(n) {
+  if (n == null) return void 0;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M THB`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}K THB`;
+  return `${Math.round(n)} THB`;
+}
+function pickDescriptionSource(o, lang, warnings) {
+  const manual = lang === "ru" ? o.descriptionManualRu : o.descriptionManualEn;
+  const other = lang === "ru" ? o.descriptionManualEn : o.descriptionManualRu;
+  if (manual && manual.trim()) return manual;
+  if (other && other.trim()) {
+    warnings.push(`\u043D\u0435\u0442 \u0440\u0443\u0447\u043D\u043E\u0433\u043E \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F (${lang}) \u2014 \u0432\u0442\u043E\u0440\u0430\u044F \u044F\u0437\u044B\u043A\u043E\u0432\u0430\u044F \u0432\u0435\u0440\u0441\u0438\u044F \u0435\u0441\u0442\u044C, \u044D\u0442\u0430 \u043E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442 (\u0434\u0432\u0443\u044F\u0437\u044B\u0447\u0438\u0435)`);
+  }
+  if (o.descriptionRaw && o.descriptionRaw.trim()) {
+    warnings.push(`\u043D\u0435\u0442 \u0440\u0443\u0447\u043D\u043E\u0433\u043E \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F (${lang}) \u2014 \u0432\u0437\u044F\u0442\u043E \u0441\u044B\u0440\u043E\u0435 DESCRIPTION_RAW, \u043F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u044F\u0437\u044B\u043A/\u0441\u043E\u0434\u0435\u0440\u0436\u0438\u043C\u043E\u0435`);
+    return o.descriptionRaw;
+  }
+  return void 0;
+}
+function sanitizeDescription(raw, lang, warnings = []) {
+  if (!raw) return void 0;
+  let s = raw.replace("\u0421\u041E\u041E\u0411\u0429\u0415\u041D\u0418\u0415 \u041E\u0422 \u0421\u041E\u0411\u0421\u0422\u0412\u0415\u041D\u041D\u0418\u041A\u0410/\u0411\u0420\u041E\u041A\u0415\u0420\u0410:", "");
+  s = s.split("\u041E\u0422\u0412\u0415\u0422\u042B \u0418\u0417 \u041E\u041F\u0420\u041E\u0421\u0410:")[0];
+  s = s.replace(REDACT_DEED, (_m, kw) => {
+    warnings.push("\u0438\u0437 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F \u0443\u0431\u0440\u0430\u043D \u043D\u043E\u043C\u0435\u0440 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 (\u0447\u0430\u043D\u043E\u0442)");
+    return kw;
+  });
+  s = s.replace(REDACT_COMMISSION, () => {
+    warnings.push("\u0438\u0437 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F \u0443\u0431\u0440\u0430\u043D\u043E \u0443\u043F\u043E\u043C\u0438\u043D\u0430\u043D\u0438\u0435 \u043A\u043E\u043C\u0438\u0441\u0441\u0438\u0438");
+    return "";
+  });
+  s = s.replace(REDACT_PRICELIST, () => {
+    warnings.push("\u0438\u0437 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F \u0443\u0431\u0440\u0430\u043D\u043E \u0443\u043F\u043E\u043C\u0438\u043D\u0430\u043D\u0438\u0435 \u043F\u0440\u0430\u0439\u0441-\u043B\u0438\u0441\u0442\u0430 \u0437\u0430\u0441\u0442\u0440\u043E\u0439\u0449\u0438\u043A\u0430");
+    return "";
+  });
+  const kept = s.split(/\r?\n/).filter((ln) => {
+    if (CONTACT_LINE_RE.test(ln)) {
+      warnings.push("\u0438\u0437 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F \u0432\u044B\u0440\u0435\u0437\u0430\u043D\u0430 \u0441\u0442\u0440\u043E\u043A\u0430 \u0441 \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u043E\u043C/\u0442\u0435\u043B\u0435\u0444\u043E\u043D\u043E\u043C");
+      return false;
+    }
+    return true;
+  });
+  s = kept.join("\n").replace(/\s+/g, " ").trim();
+  if (lang === "en" && CYRILLIC_RE.test(s)) {
+    warnings.push("\u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u0442 \u043A\u0438\u0440\u0438\u043B\u043B\u0438\u0446\u0443 \u2014 \u0443\u0431\u0440\u0430\u043D\u043E \u0438\u0437 EN-\u043F\u043E\u0441\u0442\u0430");
+    return void 0;
+  }
+  if (!s) return void 0;
+  return s.length > DESC_MAX ? `${s.slice(0, DESC_MAX).trimEnd()}\u2026` : s;
+}
+var DOCISH_FILE_RE = /(chanote|deed|cadast|кадастр|межев|чанот|\bprice\b|прайс|sheet|расч[её]т|scan|скан|\bdoc\b|документ|invoice|contract|договор)/i;
+function pickPhotos(o, max, warnings) {
+  const all = [o.coverImage, ...o.gallery ?? []].filter((u2) => !!u2);
+  const seen = /* @__PURE__ */ new Set();
+  const ok = [];
+  for (const u2 of all) {
+    if (seen.has(u2)) continue;
+    seen.add(u2);
+    if (DOCISH_FILE_RE.test(u2)) {
+      warnings.push(`\u043C\u0435\u0434\u0438\u0430 \u0441 doc-\u043F\u043E\u0434\u043E\u0431\u043D\u044B\u043C \u0438\u043C\u0435\u043D\u0435\u043C \u043E\u0442\u0441\u0435\u044F\u043D\u043E: ${u2.slice(0, 60)}`);
+      continue;
+    }
+    ok.push(u2);
+    if (ok.length >= max) break;
+  }
+  return ok;
+}
+function assertNoConfidential(pub) {
+  const text2 = [pub.title, pub.typeLabel, pub.district, pub.tenureLabel, pub.description, ...pub.features].filter(Boolean).join("\n");
+  for (const { re, label } of HARD_CONFIDENTIAL) {
+    if (re.test(text2)) {
+      throw new ConfidentialLeakError(`\u0432 \u043F\u0443\u0431\u043B\u0438\u043A\u0443\u0435\u043C\u043E\u043C \u0442\u0435\u043A\u0441\u0442\u0435 \u043E\u0431\u043D\u0430\u0440\u0443\u0436\u0435\u043D\u043E \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0435 (${label})`);
+    }
+  }
+}
+function toPublishable(o, opts) {
+  const lang = opts.lang === "ru" ? "ru" : "en";
+  const siteUrl = (opts.siteUrl ?? DEFAULT_SITE).replace(/\/+$/, "");
+  const maxPhotos = opts.maxPhotos ?? 10;
+  const rwNumber = o.rwNumber;
+  const warnings = [];
+  const reasons = [];
+  if (o.status !== "Active") reasons.push(`\u0441\u0442\u0430\u0442\u0443\u0441 \xAB${o.status || "\u2014"}\xBB \u2260 Active`);
+  if ((o.ddStatus ?? "").toLowerCase() === "red flag") reasons.push("DD: Red flag \u2014 \u043D\u0435 \u043F\u0443\u0431\u043B\u0438\u043A\u0443\u0435\u043C");
+  if (!o.coverImage) reasons.push("\u043D\u0435\u0442 \u043E\u0431\u043B\u043E\u0436\u043A\u0438 (\u0444\u043E\u0442\u043E)");
+  const description = sanitizeDescription(pickDescriptionSource(o, lang, warnings), lang, warnings);
+  if (!o.priceThb && !description) reasons.push("\u043F\u0443\u0441\u0442\u043E\u0439 \u0441\u0442\u0430\u0431: \u043D\u0435\u0442 \u043D\u0438 \u0446\u0435\u043D\u044B, \u043D\u0438 \u043F\u0440\u0438\u0433\u043E\u0434\u043D\u043E\u0433\u043E \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F");
+  if (reasons.length) return { ok: false, rwNumber, reasons, warnings };
+  const isLand = o.type === "Land";
+  const gallery = pickPhotos(o, maxPhotos, warnings);
+  const utmMedium = opts.channel === "telegram" ? "channel" : "feed";
+  const utm = `utm_source=${opts.channel}&utm_medium=${utmMedium}&utm_campaign=listing&utm_content=${encodeURIComponent(rwNumber)}`;
+  const pub = {
+    rwNumber,
+    type: o.type,
+    lang,
+    title: o.titleEn || rwNumber,
+    typeLabel: typeLabel(o.type, lang),
+    district: o.district || void 0,
+    tenureLabel: tenureLabel(o.tenure, lang),
+    priceThb: o.priceThb,
+    pricePerRai: isLand ? o.pricePerRai : void 0,
+    rentPerMonth: o.rentPerMonth,
+    rentPerRaiMonth: isLand ? o.rentPerRaiMonth : void 0,
+    leaseTermYears: o.leaseTermYears,
+    areaRai: o.areaRai,
+    areaSqm: o.areaSqm,
+    bedrooms: isLand ? void 0 : o.bedrooms,
+    bathrooms: isLand ? void 0 : o.bathrooms,
+    features: FEATURE_LABELS.filter((f) => o[f.key] === true).map((f) => lang === "ru" ? f.ru : f.en),
+    coverImage: gallery[0],
+    gallery,
+    // Координаты/карта раскрывают участок земли до кадастрового поиска — для land не выводим.
+    mapUrl: isLand ? void 0 : o.locationUrl || void 0,
+    vetted: VETTED_STATUSES.has((o.ddStatus ?? "").toLowerCase()),
+    url: `${siteUrl}/object/${encodeURIComponent(rwNumber)}?${utm}`,
+    description
+  };
+  try {
+    assertNoConfidential(pub);
+  } catch (err) {
+    const msg = err instanceof ConfidentialLeakError ? err.message : "\u043E\u0448\u0438\u0431\u043A\u0430 \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0438 \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438";
+    return { ok: false, rwNumber, reasons: [msg], warnings };
+  }
+  return { ok: true, rwNumber, object: pub, warnings };
+}
+function formatPost(r) {
+  const o = r.object;
+  const isRu = o.lang === "ru";
+  const emoji = TYPE_EMOJI[o.type] ?? "\u{1F4CD}";
+  const lines2 = [];
+  lines2.push(o.district ? `${emoji} *${o.typeLabel} \xB7 ${o.district}*` : `${emoji} *${o.typeLabel}*`);
+  if (o.title && o.title !== o.type && o.title !== o.rwNumber) lines2.push(`_${o.title.slice(0, 120)}_`);
+  if (o.vetted) lines2.push(isRu ? "\u2705 _\u041F\u0440\u043E\u0432\u0435\u0440\u0435\u043D\u043E (DD L1)_" : "\u2705 _Vetted (DD L1)_");
+  lines2.push("");
+  const facts = [];
+  if (o.areaRai) facts.push(`\u{1F4CF} ${o.areaRai} rai`);
+  else if (o.areaSqm) facts.push(`\u{1F4CF} ${o.areaSqm} m\xB2`);
+  if (o.bedrooms) facts.push(isRu ? `\u{1F6CF} ${o.bedrooms} \u0441\u043F\u0430\u043B.` : `\u{1F6CF} ${o.bedrooms} bd`);
+  if (o.tenureLabel) facts.push(`\u{1F511} ${o.tenureLabel}`);
+  if (o.leaseTermYears) facts.push(`\u23F3 ${o.leaseTermYears} ${isRu ? "\u043B\u0435\u0442" : "yrs"}`);
+  if (o.priceThb) facts.push(`\u{1F4B0} *${fmtThb(o.priceThb)}*`);
+  if (o.pricePerRai) facts.push(`\u{1F48E} ${fmtThb(o.pricePerRai)}/rai`);
+  if (o.rentPerMonth) facts.push(`\u{1F4B0} ${fmtThb(o.rentPerMonth)}/${isRu ? "\u043C\u0435\u0441" : "mo"}`);
+  if (o.rentPerRaiMonth) facts.push(`\u{1F4B0} ${fmtThb(o.rentPerRaiMonth)}/rai\xB7${isRu ? "\u043C\u0435\u0441" : "mo"}`);
+  if (facts.length) lines2.push(facts.join("  \xB7  "));
+  if (o.features.length) {
+    lines2.push("");
+    lines2.push(o.features.join(" \xB7 "));
+  }
+  if (o.description) {
+    lines2.push("");
+    lines2.push(o.description);
+  }
+  lines2.push("");
+  lines2.push(`\u{1F4CC} Ref: \`${o.rwNumber}\``);
+  lines2.push(`\u{1F310} ${o.url}`);
+  return lines2.join("\n");
+}
+
 // src/lib/write.ts
 import { eq as eq4, sql as sql2 } from "drizzle-orm";
 
@@ -1476,9 +1848,9 @@ function buildTemplateTitle(a) {
   }
   return title;
 }
-var MODEL = process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
-var API_URL = "https://api.anthropic.com/v1/messages";
-var SYSTEM_PROMPT = `You write listing titles for a boutique real-estate agency on Koh Phangan, Thailand.
+var MODEL2 = process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
+var API_URL2 = "https://api.anthropic.com/v1/messages";
+var SYSTEM_PROMPT2 = `You write listing titles for a boutique real-estate agency on Koh Phangan, Thailand.
 Write ONE English title for the property described by the user's JSON facts.
 
 Rules:
@@ -1517,7 +1889,7 @@ async function llmTitle(a) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
   try {
-    const resp = await fetch(API_URL, {
+    const resp = await fetch(API_URL2, {
       method: "POST",
       headers: {
         "x-api-key": apiKey,
@@ -1525,9 +1897,9 @@ async function llmTitle(a) {
         "content-type": "application/json"
       },
       body: JSON.stringify({
-        model: MODEL,
+        model: MODEL2,
         max_tokens: 40,
-        system: SYSTEM_PROMPT,
+        system: SYSTEM_PROMPT2,
         messages: [{ role: "user", content: factsFor(a) }]
       })
     });
@@ -1850,11 +2222,12 @@ async function createObject(db2, input) {
       row.lng = ll.lng;
     }
   }
+  const photoVet = input.photoUrls?.length ? await partitionByVetting(input.photoUrls) : { accepted: [], rejected: [] };
   const id = await db2.transaction(async (tx) => {
     const [obj] = await tx.insert(objects).values(row).returning({ id: objects.id });
-    if (input.photoUrls?.length) {
+    if (photoVet.accepted.length) {
       await tx.insert(objectPhotos).values(
-        input.photoUrls.map((url, i) => ({ objectId: obj.id, url, sort: i, isCover: i === 0 }))
+        photoVet.accepted.map((url, i) => ({ objectId: obj.id, url, sort: i, isCover: i === 0 }))
       );
     }
     if (input.docUrls?.length) {
@@ -1866,18 +2239,25 @@ async function createObject(db2, input) {
     return obj.id;
   });
   const base = process.env.SITE_BASE_URL ?? "";
-  return { rwNumber, id, url: `${base}/object/${rwNumber}` };
+  return {
+    rwNumber,
+    id,
+    url: `${base}/object/${rwNumber}`,
+    rejectedPhotos: photoVet.rejected.length ? photoVet.rejected : void 0
+  };
 }
 async function addObjectPhotos(db2, rwNumber, urls) {
   const clean2 = urls.map((u2) => String(u2).trim()).filter((u2) => /^https?:\/\//i.test(u2));
   const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq4(objects.rwNumber, rwNumber));
   if (!obj) return null;
-  if (clean2.length === 0) return { rwNumber, added: 0, coverSet: false };
+  if (clean2.length === 0) return { rwNumber, added: 0, coverSet: false, rejected: [] };
+  const { accepted, rejected } = await partitionByVetting(clean2);
+  if (accepted.length === 0) return { rwNumber, added: 0, coverSet: false, rejected };
   const existing = await db2.select({ sort: objectPhotos.sort }).from(objectPhotos).where(eq4(objectPhotos.objectId, obj.id));
   const hadPhotos = existing.length > 0;
   const startSort = existing.reduce((m, r) => Math.max(m, r.sort + 1), 0);
   await db2.insert(objectPhotos).values(
-    clean2.map((url, i) => ({
+    accepted.map((url, i) => ({
       objectId: obj.id,
       url,
       sort: startSort + i,
@@ -1885,7 +2265,7 @@ async function addObjectPhotos(db2, rwNumber, urls) {
     }))
   );
   await db2.update(objects).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq4(objects.id, obj.id));
-  return { rwNumber, added: clean2.length, coverSet: !hadPhotos };
+  return { rwNumber, added: accepted.length, coverSet: !hadPhotos, rejected };
 }
 var PATCHABLE = /* @__PURE__ */ new Set([
   "status",
@@ -2226,7 +2606,7 @@ async function referralsSummary(db2) {
 }
 
 // src/lib/articles.ts
-import { eq as eq9, and as and3, desc as desc2, sql as sql5, inArray } from "drizzle-orm";
+import { eq as eq9, and as and3, desc as desc2, sql as sql5, inArray as inArray2 } from "drizzle-orm";
 var ArticleInputError = class extends Error {
 };
 var STATUSES = ["pending", "published", "rejected"];
@@ -2813,6 +3193,17 @@ app.get("/objects/:rw", async (c) => {
   const obj = data.find((o) => o.rwNumber === rw);
   return obj ? c.json(obj) : c.json({ error: "not found" }, 404);
 });
+app.get("/objects/:rw/publishable", async (c) => {
+  const rw = c.req.param("rw");
+  const channel = c.req.query("channel") || "telegram";
+  const lang = c.req.query("lang") === "ru" ? "ru" : "en";
+  const all = await getAllObjects(db);
+  const obj = all.find((o) => o.rwNumber === rw);
+  if (!obj) return c.json({ error: "not found" }, 404);
+  const result = toPublishable(obj, { channel, lang });
+  const text2 = result.ok ? formatPost(result) : null;
+  return c.json({ result, text: text2 });
+});
 app.post("/objects", async (c) => {
   try {
     const input = await c.req.json();
@@ -2842,6 +3233,32 @@ app.post("/objects/:rw/photos", async (c) => {
   } catch (err) {
     console.error("[POST /objects/:rw/photos]", err);
     return c.json({ error: "add photos failed" }, 500);
+  }
+});
+app.post("/photos/audit", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const res = await scanPhotosForDocuments(db, {
+      rwNumbers: Array.isArray(body.rwNumbers) ? body.rwNumbers : void 0,
+      activeOnly: body.activeOnly !== false,
+      // default: only public-eligible photos
+      limit: typeof body.limit === "number" ? body.limit : void 0
+    });
+    return c.json(res);
+  } catch (err) {
+    console.error("[POST /photos/audit]", err);
+    return c.json({ error: "audit failed" }, 500);
+  }
+});
+app.post("/photos/purge", async (c) => {
+  try {
+    const { urls } = await c.req.json();
+    const list = Array.isArray(urls) ? urls : [];
+    const res = await purgePhotosByUrl(db, list);
+    return c.json({ ...res, stillNeedsBlobPurge: list });
+  } catch (err) {
+    console.error("[POST /photos/purge]", err);
+    return c.json({ error: "purge failed" }, 500);
   }
 });
 app.put("/objects/:rw/contacts", async (c) => {
