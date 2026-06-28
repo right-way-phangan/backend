@@ -272,3 +272,81 @@ export async function journeySummary(db: AnyPgDatabase, limit = 30): Promise<Jou
     recent,
   };
 }
+
+// ── Hot open leads — "who to call first" by pre-inquiry engagement ──
+// CRM sorts by date/stage; this ranks OPEN leads by what they actually did
+// (objects browsed via vid + funnel actions), so thin sales time goes to the
+// warmest first, with talking points. Leads without a vid score 0 (data accrues).
+
+const ACTION_WEIGHTS: Record<string, number> = {
+  calc: 6, save: 2, wa_click: 5, tg_click: 5, phone_click: 5,
+  email_click: 4, form_submit: 4, brochure: 1, share: 1, contact_reach: 2,
+};
+
+export interface HotLead {
+  leadId: number;
+  name: string;
+  createdAt: string;
+  rwNumber: string | null;
+  score: number;
+  viewedCount: number;
+  calc: number;
+  saves: number;
+  clicks: number;
+  why: string;
+}
+
+export async function hotOpenLeads(db: AnyPgDatabase, limit = 12): Promise<HotLead[]> {
+  const open = await db
+    .select({ id: leads.id, name: leads.name, createdAt: leads.createdAt, rwNumber: leads.rwNumber, vid: leads.vid })
+    .from(leads)
+    .where(and(eq(leads.status, "open"), sql`${leads.vid} is not null`))
+    .orderBy(desc(leads.createdAt))
+    .limit(200);
+
+  const out: HotLead[] = [];
+  for (const l of open) {
+    const vid = l.vid as string;
+    const views = await db
+      .select({ rw: objectViewVisitors.rwNumber })
+      .from(objectViewVisitors)
+      .where(eq(objectViewVisitors.vid, vid));
+    const viewedCount = new Set(views.map((v) => v.rw)).size;
+
+    const acts = await db
+      .select({ kind: visitorEvents.kind })
+      .from(visitorEvents)
+      .where(eq(visitorEvents.vid, vid));
+    const counts = new Map<string, number>();
+    for (const a of acts) counts.set(a.kind, (counts.get(a.kind) ?? 0) + 1);
+
+    let score = viewedCount * 3;
+    for (const [kind, n] of counts) score += (ACTION_WEIGHTS[kind] ?? 0) * n;
+
+    const calc = counts.get("calc") ?? 0;
+    const saves = counts.get("save") ?? 0;
+    const clicks =
+      (counts.get("wa_click") ?? 0) + (counts.get("tg_click") ?? 0) +
+      (counts.get("phone_click") ?? 0) + (counts.get("email_click") ?? 0);
+
+    const bits: string[] = [];
+    if (viewedCount) bits.push(`смотрел ${viewedCount} об.`);
+    if (calc) bits.push(`ROI ×${calc}`);
+    if (saves) bits.push(`сохранил ${saves}`);
+    if (clicks) bits.push(`клик в мессенджер ×${clicks}`);
+
+    out.push({
+      leadId: l.id,
+      name: l.name,
+      createdAt: l.createdAt instanceof Date ? l.createdAt.toISOString() : String(l.createdAt),
+      rwNumber: l.rwNumber,
+      score,
+      viewedCount,
+      calc,
+      saves,
+      clicks,
+      why: bits.join(" · ") || "без зафиксированной активности",
+    });
+  }
+  return out.sort((a, b) => b.score - a.score).slice(0, limit);
+}

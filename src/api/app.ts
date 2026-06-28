@@ -32,7 +32,7 @@ import { verifyLogin } from "../lib/auth";
 import { getSetting, listSettings, setSetting } from "../lib/settings";
 import { recordSearch, demandSummary } from "../lib/demand";
 import { trackView, viewsSummary, crossShopperCount } from "../lib/views";
-import { trackEvent, eventsSummary, trackReferral, referralsSummary, trackAiCitation, aiCitationsSummary, journeySummary } from "../lib/events";
+import { trackEvent, eventsSummary, trackReferral, referralsSummary, trackAiCitation, aiCitationsSummary, journeySummary, hotOpenLeads } from "../lib/events";
 import { metricsSeries } from "../lib/metrics";
 import {
   createArticle, listArticles, getArticleById, getArticleBySlug,
@@ -371,6 +371,12 @@ app.get("/ai-citations/summary", async (c) => {
 app.get("/journey/summary", async (c) => {
   const limit = Number(c.req.query("limit") ?? 30);
   return c.json(await journeySummary(db, Number.isFinite(limit) ? limit : 30));
+});
+
+/** Hot open leads — "who to call first" ranked by pre-inquiry engagement. */
+app.get("/leads/hot", async (c) => {
+  const limit = Number(c.req.query("limit") ?? 12);
+  return c.json(await hotOpenLeads(db, Number.isFinite(limit) ? limit : 12));
 });
 
 /** Daily metric series (views/engagement/visits/leads) — trends + WoW. */
