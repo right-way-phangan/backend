@@ -350,3 +350,127 @@ export async function hotOpenLeads(db: AnyPgDatabase, limit = 12): Promise<HotLe
   }
   return out.sort((a, b) => b.score - a.score).slice(0, limit);
 }
+
+// ── Returning / multi-object visitors — anonymous intent quality ──
+// Beyond raw view counts: which anonymous visitors (vid) came back across
+// days or browsed many objects, and which objects pull those engaged browsers.
+// "Warm anonymous" = a high-intent vid that never left a lead — demand we're
+// failing to capture. Window: last `windowDays` (object_view_visitors.day).
+
+export interface ReturningVisitors {
+  windowDays: number;
+  totalVisitors: number; // distinct vids that viewed any object in the window
+  returning: number; // vids seen on >= 2 distinct days
+  multiObject: number; // vids that viewed >= 3 distinct objects
+  warmAnonymous: number; // returning/multi-object vids with no lead (vid not on a lead)
+  magnets: { rwNumber: string; visitors: number }[]; // objects pulling engaged vids
+}
+
+export async function returningVisitors(db: AnyPgDatabase, windowDays = 60): Promise<ReturningVisitors> {
+  const since = bangkokDay(-(windowDays - 1));
+  const rows = await db
+    .select({ vid: objectViewVisitors.vid, rw: objectViewVisitors.rwNumber, day: objectViewVisitors.day })
+    .from(objectViewVisitors)
+    .where(sql`${objectViewVisitors.day} >= ${since}`);
+
+  const leadVidRows = await db
+    .select({ vid: leads.vid })
+    .from(leads)
+    .where(sql`${leads.vid} is not null`);
+  const leadVids = new Set(leadVidRows.map((l) => l.vid as string));
+
+  const byVid = new Map<string, { days: Set<string>; rws: Set<string> }>();
+  for (const r of rows) {
+    const v = byVid.get(r.vid) ?? { days: new Set<string>(), rws: new Set<string>() };
+    v.days.add(r.day);
+    v.rws.add(r.rw);
+    byVid.set(r.vid, v);
+  }
+
+  let returning = 0;
+  let multiObject = 0;
+  let warmAnonymous = 0;
+  const engagedByRw = new Map<string, Set<string>>(); // rw → set of engaged vids
+  for (const [vid, v] of byVid) {
+    const isReturning = v.days.size >= 2;
+    const isMulti = v.rws.size >= 3;
+    if (isReturning) returning++;
+    if (isMulti) multiObject++;
+    if ((isReturning || isMulti) && !leadVids.has(vid)) warmAnonymous++;
+    if (isReturning || isMulti) {
+      for (const rw of v.rws) {
+        const s = engagedByRw.get(rw) ?? new Set<string>();
+        s.add(vid);
+        engagedByRw.set(rw, s);
+      }
+    }
+  }
+
+  const magnets = [...engagedByRw.entries()]
+    .map(([rwNumber, vids]) => ({ rwNumber, visitors: vids.size }))
+    .sort((a, b) => b.visitors - a.visitors)
+    .slice(0, 12);
+
+  return { windowDays, totalVisitors: byVid.size, returning, multiObject, warmAnonymous, magnets };
+}
+
+// ── AI-citation trend — is the GEO/AEO bet compounding? ──
+// aiCitationsSummary lists top pages now; this is the KPI over time: weekly
+// citation volume (growing or flat?) + which assistants drive it.
+
+function weekStart(day: string): string {
+  const d = new Date(day + "T00:00:00Z");
+  const diff = (d.getUTCDay() + 6) % 7; // days since Monday
+  d.setUTCDate(d.getUTCDate() - diff);
+  return d.toISOString().slice(0, 10);
+}
+
+export interface AiCitationTrend {
+  windowDays: number;
+  total7: number;
+  total30: number;
+  weekly: { week: string; count: number }[]; // oldest → newest, Monday of each ISO week
+  bySource: { source: string; d7: number; d30: number }[];
+}
+
+export async function aiCitationsTrend(db: AnyPgDatabase, windowDays = 56): Promise<AiCitationTrend> {
+  const since = bangkokDay(-(windowDays - 1));
+  const from7 = bangkokDay(-6);
+  const from30 = bangkokDay(-29);
+  const rows = await db
+    .select({ source: aiCitations.source, day: aiCitations.day, count: aiCitations.count })
+    .from(aiCitations)
+    .where(sql`${aiCitations.day} >= ${since}`);
+
+  const weekly = new Map<string, number>();
+  const bySource = new Map<string, { d7: number; d30: number }>();
+  let total7 = 0;
+  let total30 = 0;
+  for (const r of rows) {
+    const c = Number(r.count);
+    const wk = weekStart(r.day);
+    weekly.set(wk, (weekly.get(wk) ?? 0) + c);
+    if (r.day >= from30) {
+      total30 += c;
+      const s = bySource.get(r.source) ?? { d7: 0, d30: 0 };
+      s.d30 += c;
+      if (r.day >= from7) {
+        s.d7 += c;
+        total7 += c;
+      }
+      bySource.set(r.source, s);
+    }
+  }
+
+  return {
+    windowDays,
+    total7,
+    total30,
+    weekly: [...weekly.entries()]
+      .map(([week, count]) => ({ week, count }))
+      .sort((a, b) => a.week.localeCompare(b.week)),
+    bySource: [...bySource.entries()]
+      .map(([source, v]) => ({ source, ...v }))
+      .sort((a, b) => b.d30 - a.d30),
+  };
+}

@@ -68,6 +68,7 @@ export interface DemandSummary {
   byTenure: Tally[];
   byFeature: Tally[];
   byBeds: Tally[];
+  byLocale: Tally[];
   priceBands: Tally[];
   topQueries: Array<{ query: string; count: number; matched: number }>;
   zeroResultQueries: Array<{ query: string; count: number }>;
@@ -98,6 +99,7 @@ export async function demandSummary(db: AnyPgDatabase, windowDays = 90): Promise
   const tenure = new Map<string, number>();
   const features = new Map<string, number>();
   const beds = new Map<string, number>();
+  const locales = new Map<string, number>();
   const bands = new Map<string, number>();
   const queries = new Map<string, { count: number; matched: number }>();
   const zero = new Map<string, number>();
@@ -126,6 +128,10 @@ export async function demandSummary(db: AnyPgDatabase, windowDays = 90): Promise
     if (r.bedroomsMin) {
       const k = `${r.bedroomsMin}+`;
       beds.set(k, (beds.get(k) ?? 0) + 1);
+    }
+    if (r.locale) {
+      const k = r.locale.toLowerCase() === "ru" ? "RU" : r.locale.toLowerCase() === "en" ? "EN" : r.locale;
+      locales.set(k, (locales.get(k) ?? 0) + 1);
     }
     // Price band keyed off whichever bound the visitor expressed.
     const p = r.priceMaxM ?? r.priceMinM;
@@ -161,6 +167,7 @@ export async function demandSummary(db: AnyPgDatabase, windowDays = 90): Promise
     byTenure: tally(tenure),
     byFeature: tally(features),
     byBeds: tally(beds).sort((a, b) => parseInt(a.name) - parseInt(b.name)),
+    byLocale: tally(locales),
     priceBands,
     topQueries: [...queries.entries()]
       .map(([query, v]) => ({ query, count: v.count, matched: v.matched }))

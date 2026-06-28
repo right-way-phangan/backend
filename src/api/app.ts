@@ -32,7 +32,7 @@ import { verifyLogin } from "../lib/auth";
 import { getSetting, listSettings, setSetting } from "../lib/settings";
 import { recordSearch, demandSummary } from "../lib/demand";
 import { trackView, viewsSummary, crossShopperCount } from "../lib/views";
-import { trackEvent, eventsSummary, trackReferral, referralsSummary, trackAiCitation, aiCitationsSummary, journeySummary, hotOpenLeads } from "../lib/events";
+import { trackEvent, eventsSummary, trackReferral, referralsSummary, trackAiCitation, aiCitationsSummary, aiCitationsTrend, journeySummary, hotOpenLeads, returningVisitors } from "../lib/events";
 import { metricsSeries } from "../lib/metrics";
 import {
   createArticle, listArticles, getArticleById, getArticleBySlug,
@@ -365,6 +365,18 @@ app.get("/referrals/summary", async (c) => {
 /** Pages cited by AI assistants (7d/30d) — GEO/AEO per-page signal. */
 app.get("/ai-citations/summary", async (c) => {
   return c.json(await aiCitationsSummary(db));
+});
+
+/** AI-citation trend over time — GEO/AEO KPI: weekly volume + per-assistant. */
+app.get("/ai-citations/trend", async (c) => {
+  const days = Number(c.req.query("days") ?? 56);
+  return c.json(await aiCitationsTrend(db, Number.isFinite(days) ? Math.min(days, 180) : 56));
+});
+
+/** Returning / multi-object anonymous visitors — intent quality + magnets. */
+app.get("/visitors/returning", async (c) => {
+  const days = Number(c.req.query("days") ?? 60);
+  return c.json(await returningVisitors(db, Number.isFinite(days) ? Math.min(days, 180) : 60));
 });
 
 /** Visitor journeys — how converting leads browsed (anonymous vid path). */
