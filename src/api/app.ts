@@ -33,6 +33,7 @@ import { getSetting, listSettings, setSetting } from "../lib/settings";
 import { recordSearch, demandSummary } from "../lib/demand";
 import { trackView, viewsSummary, crossShopperCount } from "../lib/views";
 import { trackEvent, eventsSummary, trackReferral, referralsSummary, trackAiCitation, aiCitationsSummary, journeySummary } from "../lib/events";
+import { metricsSeries } from "../lib/metrics";
 import {
   createArticle, listArticles, getArticleById, getArticleBySlug,
   updateArticle, deleteArticle, countPending, ArticleInputError,
@@ -370,6 +371,12 @@ app.get("/ai-citations/summary", async (c) => {
 app.get("/journey/summary", async (c) => {
   const limit = Number(c.req.query("limit") ?? 30);
   return c.json(await journeySummary(db, Number.isFinite(limit) ? limit : 30));
+});
+
+/** Daily metric series (views/engagement/visits/leads) — trends + WoW. */
+app.get("/metrics/series", async (c) => {
+  const days = Number(c.req.query("days") ?? 56);
+  return c.json(await metricsSeries(db, Number.isFinite(days) ? Math.min(days, 180) : 56));
 });
 
 /**
