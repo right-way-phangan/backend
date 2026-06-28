@@ -32,7 +32,7 @@ import { verifyLogin } from "../lib/auth";
 import { getSetting, listSettings, setSetting } from "../lib/settings";
 import { recordSearch, demandSummary } from "../lib/demand";
 import { trackView, viewsSummary, crossShopperCount } from "../lib/views";
-import { trackEvent, eventsSummary, trackReferral, referralsSummary, trackAiCitation, aiCitationsSummary } from "../lib/events";
+import { trackEvent, eventsSummary, trackReferral, referralsSummary, trackAiCitation, aiCitationsSummary, journeySummary } from "../lib/events";
 import {
   createArticle, listArticles, getArticleById, getArticleBySlug,
   updateArticle, deleteArticle, countPending, ArticleInputError,
@@ -325,8 +325,8 @@ app.get("/views/cross-shoppers", async (c) => {
 /** +1 engagement event. Web beacons clicks/saves/calc/brochure/share/forms here. */
 app.post("/track/event", async (c) => {
   try {
-    const { rw, kind } = await c.req.json();
-    const ok = await trackEvent(db, String(rw ?? ""), String(kind ?? ""));
+    const { rw, kind, vid } = await c.req.json();
+    const ok = await trackEvent(db, String(rw ?? ""), String(kind ?? ""), vid ? String(vid) : undefined);
     return c.json({ ok });
   } catch (err) {
     console.error("[POST /track/event]", (err as Error).message);
@@ -364,6 +364,12 @@ app.get("/referrals/summary", async (c) => {
 /** Pages cited by AI assistants (7d/30d) — GEO/AEO per-page signal. */
 app.get("/ai-citations/summary", async (c) => {
   return c.json(await aiCitationsSummary(db));
+});
+
+/** Visitor journeys — how converting leads browsed (anonymous vid path). */
+app.get("/journey/summary", async (c) => {
+  const limit = Number(c.req.query("limit") ?? 30);
+  return c.json(await journeySummary(db, Number.isFinite(limit) ? limit : 30));
 });
 
 /**

@@ -90,6 +90,8 @@ export interface NewLeadInput {
   rwNumber?: string;
   source?: string;
   kind?: string;
+  /** anonymous visitor id — links the lead to its browse journey */
+  vid?: string;
   /** default true; bulk import passes false to avoid flooding tomorrow's tasks */
   autoTask?: boolean;
 }
@@ -153,6 +155,7 @@ export async function createLead(
         rwNumber: input.rwNumber,
         source: input.source,
         kind: input.kind,
+        vid: input.vid,
         tags: input.tags?.length ? input.tags : undefined,
         updatedAt: new Date(),
       })

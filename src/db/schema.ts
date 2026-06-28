@@ -394,6 +394,28 @@ export const aiCitations = pgTable(
   (t) => ({ pk: primaryKey({ columns: [t.source, t.path, t.day] }) }),
 );
 
+/**
+ * Per-visitor engagement stream (anonymous). object_events_daily is aggregate
+ * (daily counts, no identity); this keeps the timed sequence per rotating
+ * localStorage vid so a journey can be stitched: which objects/actions a
+ * visitor went through before becoming a lead. vid is the same anonymous id as
+ * object_view_visitors — no PII, no cross-site, rotates. Views live in
+ * object_view_visitors; this holds the non-view actions (save/calc/clicks/form).
+ */
+export const visitorEvents = pgTable(
+  "visitor_events",
+  {
+    id: serial("id").primaryKey(),
+    vid: text("vid").notNull(),
+    kind: text("kind").notNull(), // save | calc | wa_click | tg_click | form_submit | …
+    rwNumber: text("rw_number"), // object the action was on, if any
+    ts: timestamp("ts", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    vidIdx: index("visitor_events_vid_idx").on(t.vid),
+  }),
+);
+
 export type ObjectRow = typeof objects.$inferSelect;
 export type ObjectInsert = typeof objects.$inferInsert;
 
@@ -459,6 +481,7 @@ export const leads = pgTable(
     rwNumber: text("rw_number"), // object the inquiry is about, if any
     source: text("source"), // "object" | "contact"
     kind: text("kind"), // inquiry | calculator | market-report | shortlist | saved-search
+    vid: text("vid"), // anonymous visitor id — links lead to its browse journey (visitor_events / object_view_visitors)
     tags: text("tags").array(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -7,8 +7,11 @@
  * form_submit on rw '__site__'). referralsDaily counts classified landing
  * referrers (AI assistants, search, social) once per session.
  */
-import { eq, sql } from "drizzle-orm";
-import { objects, objectEventsDaily, referralsDaily, aiCitations } from "../db/schema";
+import { eq, sql, and, desc, lte } from "drizzle-orm";
+import {
+  objects, objectEventsDaily, referralsDaily, aiCitations,
+  visitorEvents, objectViewVisitors, leads,
+} from "../db/schema";
 import type { AnyPgDatabase } from "./load";
 
 const SITE = "__site__";
@@ -35,7 +38,20 @@ function bangkokDay(offsetDays = 0): string {
  * (forms, off-object contact clicks); object kinds require a catalog rw.
  * Returns false on unknown kind or non-existent object.
  */
-export async function trackEvent(db: AnyPgDatabase, rwNumber: string, kind: string): Promise<boolean> {
+// High-signal funnel actions worth keeping per-visitor (for journey stitching).
+// Excludes noisy passive signals (scroll/dwell/gallery) — those stay aggregate.
+const JOURNEY_KINDS = new Set([
+  "save", "calc", "brochure", "share",
+  "wa_click", "tg_click", "phone_click", "email_click",
+  "form_start", "form_submit", "contact_reach",
+]);
+
+export async function trackEvent(
+  db: AnyPgDatabase,
+  rwNumber: string,
+  kind: string,
+  vid?: string,
+): Promise<boolean> {
   const rw = (rwNumber || "").trim() || SITE;
   if (rw === SITE) {
     if (!SITE_KINDS.has(kind)) return false;
@@ -56,6 +72,12 @@ export async function trackEvent(db: AnyPgDatabase, rwNumber: string, kind: stri
       target: [objectEventsDaily.rwNumber, objectEventsDaily.kind, objectEventsDaily.day],
       set: { count: sql`${objectEventsDaily.count} + 1` },
     });
+
+  // Per-visitor stream (anonymous) — only high-signal funnel actions.
+  const v = (vid || "").trim().slice(0, 64);
+  if (v && JOURNEY_KINDS.has(kind)) {
+    await db.insert(visitorEvents).values({ vid: v, kind, rwNumber: rw === SITE ? null : rw });
+  }
   return true;
 }
 
@@ -166,4 +188,87 @@ export async function referralsSummary(db: AnyPgDatabase): Promise<ReferralRow[]
   return rows
     .map((r) => ({ source: r.source, d7: Number(r.d7), d30: Number(r.d30) }))
     .sort((a, b) => b.d30 - a.d30);
+}
+
+// ── Visitor journey (anonymous) — referral→views→actions→lead ──
+// Stitches a lead to its browse path via the shared vid: objects viewed
+// (object_view_visitors) + funnel actions (visitor_events) before the lead.
+
+export interface JourneyAction {
+  kind: string;
+  rwNumber: string | null;
+  ts: string;
+}
+export interface JourneyLead {
+  leadId: number;
+  name: string;
+  status: string;
+  createdAt: string;
+  rwNumber: string | null;
+  viewedRw: string[];
+  actions: JourneyAction[];
+}
+export interface JourneySummary {
+  totalLeads: number;
+  attributable: number; // leads carrying a vid
+  avgViewsBeforeLead: number | null;
+  topObjects: { rwNumber: string; count: number }[];
+  recent: JourneyLead[];
+}
+
+export async function journeySummary(db: AnyPgDatabase, limit = 30): Promise<JourneySummary> {
+  const all = await db
+    .select({
+      id: leads.id, name: leads.name, status: leads.status,
+      createdAt: leads.createdAt, rwNumber: leads.rwNumber, vid: leads.vid,
+    })
+    .from(leads)
+    .orderBy(desc(leads.createdAt));
+
+  const withVid = all.filter((l) => l.vid);
+  const recent: JourneyLead[] = [];
+  const objCount = new Map<string, number>();
+  let viewsSum = 0;
+
+  for (const l of withVid.slice(0, Math.max(limit, 40))) {
+    const vid = l.vid as string;
+    const views = await db
+      .select({ rw: objectViewVisitors.rwNumber })
+      .from(objectViewVisitors)
+      .where(eq(objectViewVisitors.vid, vid));
+    const viewedRw = [...new Set(views.map((v) => v.rw))];
+    viewsSum += viewedRw.length;
+    for (const rw of viewedRw) objCount.set(rw, (objCount.get(rw) ?? 0) + 1);
+
+    const acts = await db
+      .select({ kind: visitorEvents.kind, rwNumber: visitorEvents.rwNumber, ts: visitorEvents.ts })
+      .from(visitorEvents)
+      .where(and(eq(visitorEvents.vid, vid), lte(visitorEvents.ts, l.createdAt)))
+      .orderBy(visitorEvents.ts);
+
+    if (recent.length < limit) {
+      recent.push({
+        leadId: l.id, name: l.name, status: l.status,
+        createdAt: l.createdAt instanceof Date ? l.createdAt.toISOString() : String(l.createdAt),
+        rwNumber: l.rwNumber,
+        viewedRw,
+        actions: acts.map((a) => ({
+          kind: a.kind, rwNumber: a.rwNumber,
+          ts: a.ts instanceof Date ? a.ts.toISOString() : String(a.ts),
+        })),
+      });
+    }
+  }
+
+  const sampled = Math.min(withVid.length, Math.max(limit, 40));
+  return {
+    totalLeads: all.length,
+    attributable: withVid.length,
+    avgViewsBeforeLead: sampled > 0 ? Math.round((viewsSum / sampled) * 10) / 10 : null,
+    topObjects: [...objCount.entries()]
+      .map(([rwNumber, count]) => ({ rwNumber, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 12),
+    recent,
+  };
 }
