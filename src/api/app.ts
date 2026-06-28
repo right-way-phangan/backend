@@ -32,7 +32,7 @@ import { verifyLogin } from "../lib/auth";
 import { getSetting, listSettings, setSetting } from "../lib/settings";
 import { recordSearch, demandSummary } from "../lib/demand";
 import { trackView, viewsSummary, crossShopperCount } from "../lib/views";
-import { trackEvent, eventsSummary, trackReferral, referralsSummary } from "../lib/events";
+import { trackEvent, eventsSummary, trackReferral, referralsSummary, trackAiCitation, aiCitationsSummary } from "../lib/events";
 import {
   createArticle, listArticles, getArticleById, getArticleBySlug,
   updateArticle, deleteArticle, countPending, ArticleInputError,
@@ -341,11 +341,14 @@ app.get("/events/summary", async (c) => {
 
 // ---- Referral channels (AI assistants / search / social) ----
 
-/** +1 referral for a classified landing source (once per session, from web). */
+/** +1 referral for a classified landing source (once per session, from web).
+ * For ai:* sources, also records WHICH page was cited (optional path). */
 app.post("/track/referral", async (c) => {
   try {
-    const { source } = await c.req.json();
-    const ok = await trackReferral(db, String(source ?? ""));
+    const { source, path } = await c.req.json();
+    const s = String(source ?? "");
+    const ok = await trackReferral(db, s);
+    if (path) await trackAiCitation(db, s, String(path));
     return c.json({ ok });
   } catch (err) {
     console.error("[POST /track/referral]", (err as Error).message);
@@ -356,6 +359,11 @@ app.post("/track/referral", async (c) => {
 /** Referral sources by visit counts (7d/30d) — AI/search/social breakdown. */
 app.get("/referrals/summary", async (c) => {
   return c.json(await referralsSummary(db));
+});
+
+/** Pages cited by AI assistants (7d/30d) — GEO/AEO per-page signal. */
+app.get("/ai-citations/summary", async (c) => {
+  return c.json(await aiCitationsSummary(db));
 });
 
 /**

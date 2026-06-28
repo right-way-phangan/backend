@@ -8,7 +8,7 @@
  * referrers (AI assistants, search, social) once per session.
  */
 import { eq, sql } from "drizzle-orm";
-import { objects, objectEventsDaily, referralsDaily } from "../db/schema";
+import { objects, objectEventsDaily, referralsDaily, aiCitations } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
 
 const SITE = "__site__";
@@ -94,6 +94,54 @@ export async function trackReferral(db: AnyPgDatabase, source: string): Promise<
       set: { count: sql`${referralsDaily.count} + 1` },
     });
   return true;
+}
+
+/** Record which page an AI assistant cited (landing pathname). ai:* only. */
+export async function trackAiCitation(db: AnyPgDatabase, source: string, path: string): Promise<boolean> {
+  const s = (source || "").trim().slice(0, 40);
+  const p = (path || "").trim().slice(0, 200);
+  if (!s.startsWith("ai:") || !p.startsWith("/")) return false;
+  await db
+    .insert(aiCitations)
+    .values({ source: s, path: p, day: bangkokDay(), count: 1 })
+    .onConflictDoUpdate({
+      target: [aiCitations.source, aiCitations.path, aiCitations.day],
+      set: { count: sql`${aiCitations.count} + 1` },
+    });
+  return true;
+}
+
+export interface AiCitationRow {
+  path: string;
+  d7: number;
+  d30: number;
+  sources: string[];
+}
+
+/** Pages cited by AI assistants, 7d/30d visit counts + which engines. */
+export async function aiCitationsSummary(db: AnyPgDatabase): Promise<AiCitationRow[]> {
+  const from7 = bangkokDay(-6);
+  const from30 = bangkokDay(-29);
+  const rows = await db
+    .select({
+      path: aiCitations.path,
+      source: aiCitations.source,
+      d7: sql<number>`coalesce(sum(${aiCitations.count}) filter (where ${aiCitations.day} >= ${from7}), 0)`,
+      d30: sql<number>`coalesce(sum(${aiCitations.count}) filter (where ${aiCitations.day} >= ${from30}), 0)`,
+    })
+    .from(aiCitations)
+    .where(sql`${aiCitations.day} >= ${from30}`)
+    .groupBy(aiCitations.path, aiCitations.source);
+
+  const byPath = new Map<string, AiCitationRow>();
+  for (const r of rows) {
+    const cur = byPath.get(r.path) ?? { path: r.path, d7: 0, d30: 0, sources: [] };
+    cur.d7 += Number(r.d7);
+    cur.d30 += Number(r.d30);
+    if (Number(r.d30) > 0 && !cur.sources.includes(r.source)) cur.sources.push(r.source);
+    byPath.set(r.path, cur);
+  }
+  return [...byPath.values()].sort((a, b) => b.d30 - a.d30);
 }
 
 export interface ReferralRow {

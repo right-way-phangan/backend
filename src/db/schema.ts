@@ -375,6 +375,25 @@ export const referralsDaily = pgTable(
   (t) => ({ pk: primaryKey({ columns: [t.source, t.day] }) }),
 );
 
+/**
+ * AI-citation landing pages — which page an AI assistant (Perplexity / ChatGPT /
+ * Gemini / …) sent a visitor to. referralsDaily answers "how many came via AI";
+ * this answers "WHICH of our pages the AI cited", turning the GEO/AEO bet into a
+ * per-page signal (what content the answer engines actually surface). Only ai:*
+ * sources are recorded (keeps volume low); path is the clipped landing pathname,
+ * no query/identity. Daily aggregate, no visitor id.
+ */
+export const aiCitations = pgTable(
+  "ai_citations",
+  {
+    source: text("source").notNull(), // ai:perplexity | ai:chatgpt | …
+    path: text("path").notNull(), // landing pathname, e.g. /object/RW-V0003
+    day: text("day").notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.source, t.path, t.day] }) }),
+);
+
 export type ObjectRow = typeof objects.$inferSelect;
 export type ObjectInsert = typeof objects.$inferInsert;
 
