@@ -17,6 +17,9 @@ const SITE = "__site__";
 const OBJECT_KINDS = new Set([
   "wa_click", "tg_click", "phone_click", "email_click",
   "save", "calc", "brochure", "share",
+  // On-page engagement (object detail pages, fire-once per page view):
+  // dwell 30s, scroll depth 50/90%, gallery opened, reached the contact form.
+  "dwell_30s", "scroll_50", "scroll_90", "gallery_open", "contact_reach",
 ]);
 const SITE_KINDS = new Set(["form_start", "form_submit", "wa_click", "tg_click", "phone_click", "email_click"]);
 export const CLICK_KINDS = ["wa_click", "tg_click", "phone_click", "email_click"] as const;
