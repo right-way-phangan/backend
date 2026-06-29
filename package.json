@@ -21,13 +21,13 @@
     "test": "tsx --test src/lib/*.test.ts"
   },
   "dependencies": {
-    "@electric-sql/pglite": "^0.2.17",
-    "@hono/node-server": "^2.0.4",
+    "@electric-sql/pglite": "^0.5.3",
+    "@hono/node-server": "^2.0.6",
     "@types/bcryptjs": "^2.4.6",
     "bcryptjs": "^3.0.3",
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.45.2",
-    "hono": "^4.12.25",
+    "hono": "^4.12.27",
     "postgres": "^3.4.5"
   },
   "devDependencies": {
