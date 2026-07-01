@@ -603,6 +603,7 @@ export async function updateLead(
   db: AnyPgDatabase,
   id: number,
   patch: {
+    pipelineKey?: string;
     stageKey?: string;
     status?: string;
     lostReason?: string;
@@ -615,6 +616,24 @@ export async function updateLead(
   const [lead] = await db.select().from(leads).where(eq(leads.id, id));
   if (!lead) return null;
   const set: Record<string, unknown> = { updatedAt: new Date() };
+
+  // Pipeline change: resolve the new pipeline and move to its first stage.
+  if (patch.pipelineKey) {
+    const [newPipe] = await db.select().from(pipelines).where(eq(pipelines.key, patch.pipelineKey));
+    if (newPipe && newPipe.id !== lead.pipelineId) {
+      const pipeStages = await db
+        .select()
+        .from(stages)
+        .where(eq(stages.pipelineId, newPipe.id))
+        .orderBy(stages.sort);
+      const targetStageKey = patch.stageKey ?? "incoming";
+      const target = pipeStages.find((s) => s.key === targetStageKey) ?? pipeStages[0];
+      set.pipelineId = newPipe.id;
+      if (target) set.stageId = target.id;
+      patch = { ...patch, stageKey: undefined }; // stage already resolved above
+    }
+  }
+
   if (patch.status) set.status = patch.status;
   if (patch.expectedCloseAt !== undefined) {
     const d = patch.expectedCloseAt ? new Date(patch.expectedCloseAt) : null;
@@ -633,11 +652,12 @@ export async function updateLead(
     set.tags = patch.tags.map((t) => String(t).trim()).filter(Boolean);
   }
   let stageEvent: { fromStage: string | null; toStage: string } | null = null;
-  if (patch.stageKey && lead.pipelineId != null) {
+  const resolvedPipelineId = (set.pipelineId as number | undefined) ?? lead.pipelineId;
+  if (patch.stageKey && resolvedPipelineId != null) {
     const [st] = await db
       .select()
       .from(stages)
-      .where(and(eq(stages.pipelineId, lead.pipelineId), eq(stages.key, patch.stageKey)));
+      .where(and(eq(stages.pipelineId, resolvedPipelineId), eq(stages.key, patch.stageKey)));
     if (st) {
       set.stageId = st.id;
       set.status = st.isWon ? "won" : st.isLost ? "lost" : "open";
