@@ -2361,14 +2361,34 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   // traced plot contour (admin map editor); null clears
   "plotPolygon",
   // eyeball/approx coordinate flag (bulk seed of legacy plots without a survey)
-  "coordsApprox"
+  "coordsApprox",
+  // off-plan лендинг (/projects) — сырой многострочный формат как в createObject
+  "floorplanUrls",
+  "videoUrls",
+  "priceStages",
+  "timeline",
+  "team"
 ]);
+var PAIR_KEYS = {
+  priceStages: ["label", "value"],
+  timeline: ["date", "event"],
+  team: ["role", "name"]
+};
 async function updateObject(db2, rwNumber, patch) {
   const set = { updatedAt: /* @__PURE__ */ new Date() };
   for (const [k, v] of Object.entries(patch)) {
     if (!PATCHABLE.has(k)) continue;
     if (k === "plotPolygon") {
       set[k] = v == null ? null : sanitizePolygon(v) ?? null;
+      continue;
+    }
+    if (k === "floorplanUrls" || k === "videoUrls") {
+      set[k] = typeof v === "string" ? parseUrls(v) ?? null : null;
+      continue;
+    }
+    if (k === "priceStages" || k === "timeline" || k === "team") {
+      const [pk, pv] = PAIR_KEYS[k];
+      set[k] = typeof v === "string" ? parsePairs(v, pk, pv) ?? null : null;
       continue;
     }
     set[k] = v;
