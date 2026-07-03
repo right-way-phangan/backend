@@ -20,6 +20,7 @@ import "dotenv/config";
 var schema_exports = {};
 __export(schema_exports, {
   agentTasks: () => agentTasks,
+  aiCitations: () => aiCitations,
   appSettings: () => appSettings,
   articles: () => articles,
   contactThreads: () => contactThreads,
@@ -47,7 +48,8 @@ __export(schema_exports, {
   users: () => users,
   valuationComps: () => valuationComps,
   valuationFactors: () => valuationFactors,
-  valuations: () => valuations
+  valuations: () => valuations,
+  visitorEvents: () => visitorEvents
 });
 import {
   pgTable,
@@ -320,6 +322,33 @@ var referralsDaily = pgTable(
   },
   (t) => ({ pk: primaryKey({ columns: [t.source, t.day] }) })
 );
+var aiCitations = pgTable(
+  "ai_citations",
+  {
+    source: text("source").notNull(),
+    // ai:perplexity | ai:chatgpt | …
+    path: text("path").notNull(),
+    // landing pathname, e.g. /object/RW-V0003
+    day: text("day").notNull(),
+    count: integer("count").notNull().default(0)
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.source, t.path, t.day] }) })
+);
+var visitorEvents = pgTable(
+  "visitor_events",
+  {
+    id: serial("id").primaryKey(),
+    vid: text("vid").notNull(),
+    kind: text("kind").notNull(),
+    // save | calc | wa_click | tg_click | form_submit | …
+    rwNumber: text("rw_number"),
+    // object the action was on, if any
+    ts: timestamp("ts", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({
+    vidIdx: index("visitor_events_vid_idx").on(t.vid)
+  })
+);
 var pipelines = pgTable("pipelines", {
   id: serial("id").primaryKey(),
   key: text("key").notNull().unique(),
@@ -385,6 +414,8 @@ var leads = pgTable(
     // "object" | "contact"
     kind: text("kind"),
     // inquiry | calculator | market-report | shortlist | saved-search
+    vid: text("vid"),
+    // anonymous visitor id — links lead to its browse journey (visitor_events / object_view_visitors)
     tags: text("tags").array(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
@@ -1096,6 +1127,7 @@ async function createLead(db2, input) {
       rwNumber: input.rwNumber,
       source: input.source,
       kind: input.kind,
+      vid: input.vid,
       tags: input.tags?.length ? input.tags : void 0,
       updatedAt: /* @__PURE__ */ new Date()
     }).returning({ id: leads.id });
@@ -1370,6 +1402,17 @@ async function updateLead(db2, id, patch) {
   const [lead] = await db2.select().from(leads).where(eq2(leads.id, id));
   if (!lead) return null;
   const set = { updatedAt: /* @__PURE__ */ new Date() };
+  if (patch.pipelineKey) {
+    const [newPipe] = await db2.select().from(pipelines).where(eq2(pipelines.key, patch.pipelineKey));
+    if (newPipe && newPipe.id !== lead.pipelineId) {
+      const pipeStages = await db2.select().from(stages).where(eq2(stages.pipelineId, newPipe.id)).orderBy(stages.sort);
+      const targetStageKey = patch.stageKey ?? "incoming";
+      const target = pipeStages.find((s) => s.key === targetStageKey) ?? pipeStages[0];
+      set.pipelineId = newPipe.id;
+      if (target) set.stageId = target.id;
+      patch = { ...patch, stageKey: void 0 };
+    }
+  }
   if (patch.status) set.status = patch.status;
   if (patch.expectedCloseAt !== void 0) {
     const d = patch.expectedCloseAt ? new Date(patch.expectedCloseAt) : null;
@@ -1388,8 +1431,9 @@ async function updateLead(db2, id, patch) {
     set.tags = patch.tags.map((t) => String(t).trim()).filter(Boolean);
   }
   let stageEvent = null;
-  if (patch.stageKey && lead.pipelineId != null) {
-    const [st] = await db2.select().from(stages).where(and(eq2(stages.pipelineId, lead.pipelineId), eq2(stages.key, patch.stageKey)));
+  const resolvedPipelineId = set.pipelineId ?? lead.pipelineId;
+  if (patch.stageKey && resolvedPipelineId != null) {
+    const [st] = await db2.select().from(stages).where(and(eq2(stages.pipelineId, resolvedPipelineId), eq2(stages.key, patch.stageKey)));
     if (st) {
       set.stageId = st.id;
       set.status = st.isWon ? "won" : st.isLost ? "lost" : "open";
@@ -2432,6 +2476,7 @@ async function demandSummary(db2, windowDays = 90) {
   const tenure = /* @__PURE__ */ new Map();
   const features = /* @__PURE__ */ new Map();
   const beds = /* @__PURE__ */ new Map();
+  const locales = /* @__PURE__ */ new Map();
   const bands = /* @__PURE__ */ new Map();
   const queries = /* @__PURE__ */ new Map();
   const zero = /* @__PURE__ */ new Map();
@@ -2457,6 +2502,10 @@ async function demandSummary(db2, windowDays = 90) {
     if (r.bedroomsMin) {
       const k = `${r.bedroomsMin}+`;
       beds.set(k, (beds.get(k) ?? 0) + 1);
+    }
+    if (r.locale) {
+      const k = r.locale.toLowerCase() === "ru" ? "RU" : r.locale.toLowerCase() === "en" ? "EN" : r.locale;
+      locales.set(k, (locales.get(k) ?? 0) + 1);
     }
     const p = r.priceMaxM ?? r.priceMinM;
     if (p != null) {
@@ -2488,6 +2537,7 @@ async function demandSummary(db2, windowDays = 90) {
     byTenure: tally(tenure),
     byFeature: tally(features),
     byBeds: tally(beds).sort((a, b) => parseInt(a.name) - parseInt(b.name)),
+    byLocale: tally(locales),
     priceBands,
     topQueries: [...queries.entries()].map(([query, v]) => ({ query, count: v.count, matched: v.matched })).sort((a, b) => b.count - a.count).slice(0, 25),
     zeroResultQueries: [...zero.entries()].map(([query, count]) => ({ query, count })).sort((a, b) => b.count - a.count).slice(0, 25)
@@ -2543,7 +2593,7 @@ async function crossShopperCount(db2) {
 }
 
 // src/lib/events.ts
-import { eq as eq8, sql as sql4 } from "drizzle-orm";
+import { eq as eq8, sql as sql4, and as and3, desc as desc2, lte } from "drizzle-orm";
 var SITE = "__site__";
 var OBJECT_KINDS = /* @__PURE__ */ new Set([
   "wa_click",
@@ -2553,13 +2603,33 @@ var OBJECT_KINDS = /* @__PURE__ */ new Set([
   "save",
   "calc",
   "brochure",
-  "share"
+  "share",
+  // On-page engagement (object detail pages, fire-once per page view):
+  // dwell 30s, scroll depth 50/90%, gallery opened, reached the contact form.
+  "dwell_30s",
+  "scroll_50",
+  "scroll_90",
+  "gallery_open",
+  "contact_reach"
 ]);
 var SITE_KINDS = /* @__PURE__ */ new Set(["form_start", "form_submit", "wa_click", "tg_click", "phone_click", "email_click"]);
 function bangkokDay3(offsetDays = 0) {
   return new Date(Date.now() + 7 * 36e5 + offsetDays * 864e5).toISOString().slice(0, 10);
 }
-async function trackEvent(db2, rwNumber, kind) {
+var JOURNEY_KINDS = /* @__PURE__ */ new Set([
+  "save",
+  "calc",
+  "brochure",
+  "share",
+  "wa_click",
+  "tg_click",
+  "phone_click",
+  "email_click",
+  "form_start",
+  "form_submit",
+  "contact_reach"
+]);
+async function trackEvent(db2, rwNumber, kind, vid) {
   const rw = (rwNumber || "").trim() || SITE;
   if (rw === SITE) {
     if (!SITE_KINDS.has(kind)) return false;
@@ -2572,6 +2642,10 @@ async function trackEvent(db2, rwNumber, kind) {
     target: [objectEventsDaily.rwNumber, objectEventsDaily.kind, objectEventsDaily.day],
     set: { count: sql4`${objectEventsDaily.count} + 1` }
   });
+  const v = (vid || "").trim().slice(0, 64);
+  if (v && JOURNEY_KINDS.has(kind)) {
+    await db2.insert(visitorEvents).values({ vid: v, kind, rwNumber: rw === SITE ? null : rw });
+  }
   return true;
 }
 async function eventsSummary(db2) {
@@ -2594,6 +2668,35 @@ async function trackReferral(db2, source) {
   });
   return true;
 }
+async function trackAiCitation(db2, source, path) {
+  const s = (source || "").trim().slice(0, 40);
+  const p = (path || "").trim().slice(0, 200);
+  if (!s.startsWith("ai:") || !p.startsWith("/")) return false;
+  await db2.insert(aiCitations).values({ source: s, path: p, day: bangkokDay3(), count: 1 }).onConflictDoUpdate({
+    target: [aiCitations.source, aiCitations.path, aiCitations.day],
+    set: { count: sql4`${aiCitations.count} + 1` }
+  });
+  return true;
+}
+async function aiCitationsSummary(db2) {
+  const from7 = bangkokDay3(-6);
+  const from30 = bangkokDay3(-29);
+  const rows = await db2.select({
+    path: aiCitations.path,
+    source: aiCitations.source,
+    d7: sql4`coalesce(sum(${aiCitations.count}) filter (where ${aiCitations.day} >= ${from7}), 0)`,
+    d30: sql4`coalesce(sum(${aiCitations.count}) filter (where ${aiCitations.day} >= ${from30}), 0)`
+  }).from(aiCitations).where(sql4`${aiCitations.day} >= ${from30}`).groupBy(aiCitations.path, aiCitations.source);
+  const byPath = /* @__PURE__ */ new Map();
+  for (const r of rows) {
+    const cur = byPath.get(r.path) ?? { path: r.path, d7: 0, d30: 0, sources: [] };
+    cur.d7 += Number(r.d7);
+    cur.d30 += Number(r.d30);
+    if (Number(r.d30) > 0 && !cur.sources.includes(r.source)) cur.sources.push(r.source);
+    byPath.set(r.path, cur);
+  }
+  return [...byPath.values()].sort((a, b) => b.d30 - a.d30);
+}
 async function referralsSummary(db2) {
   const from7 = bangkokDay3(-6);
   const from30 = bangkokDay3(-29);
@@ -2604,9 +2707,208 @@ async function referralsSummary(db2) {
   }).from(referralsDaily).where(sql4`${referralsDaily.day} >= ${from30}`).groupBy(referralsDaily.source);
   return rows.map((r) => ({ source: r.source, d7: Number(r.d7), d30: Number(r.d30) })).sort((a, b) => b.d30 - a.d30);
 }
+async function journeySummary(db2, limit = 30) {
+  const all = await db2.select({
+    id: leads.id,
+    name: leads.name,
+    status: leads.status,
+    createdAt: leads.createdAt,
+    rwNumber: leads.rwNumber,
+    vid: leads.vid
+  }).from(leads).orderBy(desc2(leads.createdAt));
+  const withVid = all.filter((l) => l.vid);
+  const recent = [];
+  const objCount = /* @__PURE__ */ new Map();
+  let viewsSum = 0;
+  for (const l of withVid.slice(0, Math.max(limit, 40))) {
+    const vid = l.vid;
+    const views = await db2.select({ rw: objectViewVisitors.rwNumber }).from(objectViewVisitors).where(eq8(objectViewVisitors.vid, vid));
+    const viewedRw = [...new Set(views.map((v) => v.rw))];
+    viewsSum += viewedRw.length;
+    for (const rw of viewedRw) objCount.set(rw, (objCount.get(rw) ?? 0) + 1);
+    const acts = await db2.select({ kind: visitorEvents.kind, rwNumber: visitorEvents.rwNumber, ts: visitorEvents.ts }).from(visitorEvents).where(and3(eq8(visitorEvents.vid, vid), lte(visitorEvents.ts, l.createdAt))).orderBy(visitorEvents.ts);
+    if (recent.length < limit) {
+      recent.push({
+        leadId: l.id,
+        name: l.name,
+        status: l.status,
+        createdAt: l.createdAt instanceof Date ? l.createdAt.toISOString() : String(l.createdAt),
+        rwNumber: l.rwNumber,
+        viewedRw,
+        actions: acts.map((a) => ({
+          kind: a.kind,
+          rwNumber: a.rwNumber,
+          ts: a.ts instanceof Date ? a.ts.toISOString() : String(a.ts)
+        }))
+      });
+    }
+  }
+  const sampled = Math.min(withVid.length, Math.max(limit, 40));
+  return {
+    totalLeads: all.length,
+    attributable: withVid.length,
+    avgViewsBeforeLead: sampled > 0 ? Math.round(viewsSum / sampled * 10) / 10 : null,
+    topObjects: [...objCount.entries()].map(([rwNumber, count]) => ({ rwNumber, count })).sort((a, b) => b.count - a.count).slice(0, 12),
+    recent
+  };
+}
+var ACTION_WEIGHTS = {
+  calc: 6,
+  save: 2,
+  wa_click: 5,
+  tg_click: 5,
+  phone_click: 5,
+  email_click: 4,
+  form_submit: 4,
+  brochure: 1,
+  share: 1,
+  contact_reach: 2
+};
+async function hotOpenLeads(db2, limit = 12) {
+  const open = await db2.select({ id: leads.id, name: leads.name, createdAt: leads.createdAt, rwNumber: leads.rwNumber, vid: leads.vid }).from(leads).where(and3(eq8(leads.status, "open"), sql4`${leads.vid} is not null`)).orderBy(desc2(leads.createdAt)).limit(200);
+  const out = [];
+  for (const l of open) {
+    const vid = l.vid;
+    const views = await db2.select({ rw: objectViewVisitors.rwNumber }).from(objectViewVisitors).where(eq8(objectViewVisitors.vid, vid));
+    const viewedCount = new Set(views.map((v) => v.rw)).size;
+    const acts = await db2.select({ kind: visitorEvents.kind }).from(visitorEvents).where(eq8(visitorEvents.vid, vid));
+    const counts = /* @__PURE__ */ new Map();
+    for (const a of acts) counts.set(a.kind, (counts.get(a.kind) ?? 0) + 1);
+    let score = viewedCount * 3;
+    for (const [kind, n] of counts) score += (ACTION_WEIGHTS[kind] ?? 0) * n;
+    const calc = counts.get("calc") ?? 0;
+    const saves = counts.get("save") ?? 0;
+    const clicks = (counts.get("wa_click") ?? 0) + (counts.get("tg_click") ?? 0) + (counts.get("phone_click") ?? 0) + (counts.get("email_click") ?? 0);
+    const bits = [];
+    if (viewedCount) bits.push(`\u0441\u043C\u043E\u0442\u0440\u0435\u043B ${viewedCount} \u043E\u0431.`);
+    if (calc) bits.push(`ROI \xD7${calc}`);
+    if (saves) bits.push(`\u0441\u043E\u0445\u0440\u0430\u043D\u0438\u043B ${saves}`);
+    if (clicks) bits.push(`\u043A\u043B\u0438\u043A \u0432 \u043C\u0435\u0441\u0441\u0435\u043D\u0434\u0436\u0435\u0440 \xD7${clicks}`);
+    out.push({
+      leadId: l.id,
+      name: l.name,
+      createdAt: l.createdAt instanceof Date ? l.createdAt.toISOString() : String(l.createdAt),
+      rwNumber: l.rwNumber,
+      score,
+      viewedCount,
+      calc,
+      saves,
+      clicks,
+      why: bits.join(" \xB7 ") || "\u0431\u0435\u0437 \u0437\u0430\u0444\u0438\u043A\u0441\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u043E\u0439 \u0430\u043A\u0442\u0438\u0432\u043D\u043E\u0441\u0442\u0438"
+    });
+  }
+  return out.sort((a, b) => b.score - a.score).slice(0, limit);
+}
+async function returningVisitors(db2, windowDays = 60) {
+  const since = bangkokDay3(-(windowDays - 1));
+  const rows = await db2.select({ vid: objectViewVisitors.vid, rw: objectViewVisitors.rwNumber, day: objectViewVisitors.day }).from(objectViewVisitors).where(sql4`${objectViewVisitors.day} >= ${since}`);
+  const leadVidRows = await db2.select({ vid: leads.vid }).from(leads).where(sql4`${leads.vid} is not null`);
+  const leadVids = new Set(leadVidRows.map((l) => l.vid));
+  const byVid = /* @__PURE__ */ new Map();
+  for (const r of rows) {
+    const v = byVid.get(r.vid) ?? { days: /* @__PURE__ */ new Set(), rws: /* @__PURE__ */ new Set() };
+    v.days.add(r.day);
+    v.rws.add(r.rw);
+    byVid.set(r.vid, v);
+  }
+  let returning = 0;
+  let multiObject = 0;
+  let warmAnonymous = 0;
+  const engagedByRw = /* @__PURE__ */ new Map();
+  for (const [vid, v] of byVid) {
+    const isReturning = v.days.size >= 2;
+    const isMulti = v.rws.size >= 3;
+    if (isReturning) returning++;
+    if (isMulti) multiObject++;
+    if ((isReturning || isMulti) && !leadVids.has(vid)) warmAnonymous++;
+    if (isReturning || isMulti) {
+      for (const rw of v.rws) {
+        const s = engagedByRw.get(rw) ?? /* @__PURE__ */ new Set();
+        s.add(vid);
+        engagedByRw.set(rw, s);
+      }
+    }
+  }
+  const magnets = [...engagedByRw.entries()].map(([rwNumber, vids]) => ({ rwNumber, visitors: vids.size })).sort((a, b) => b.visitors - a.visitors).slice(0, 12);
+  return { windowDays, totalVisitors: byVid.size, returning, multiObject, warmAnonymous, magnets };
+}
+function weekStart(day) {
+  const d = /* @__PURE__ */ new Date(day + "T00:00:00Z");
+  const diff = (d.getUTCDay() + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - diff);
+  return d.toISOString().slice(0, 10);
+}
+async function aiCitationsTrend(db2, windowDays = 56) {
+  const since = bangkokDay3(-(windowDays - 1));
+  const from7 = bangkokDay3(-6);
+  const from30 = bangkokDay3(-29);
+  const rows = await db2.select({ source: aiCitations.source, day: aiCitations.day, count: aiCitations.count }).from(aiCitations).where(sql4`${aiCitations.day} >= ${since}`);
+  const weekly = /* @__PURE__ */ new Map();
+  const bySource = /* @__PURE__ */ new Map();
+  let total7 = 0;
+  let total30 = 0;
+  for (const r of rows) {
+    const c = Number(r.count);
+    const wk = weekStart(r.day);
+    weekly.set(wk, (weekly.get(wk) ?? 0) + c);
+    if (r.day >= from30) {
+      total30 += c;
+      const s = bySource.get(r.source) ?? { d7: 0, d30: 0 };
+      s.d30 += c;
+      if (r.day >= from7) {
+        s.d7 += c;
+        total7 += c;
+      }
+      bySource.set(r.source, s);
+    }
+  }
+  return {
+    windowDays,
+    total7,
+    total30,
+    weekly: [...weekly.entries()].map(([week, count]) => ({ week, count })).sort((a, b) => a.week.localeCompare(b.week)),
+    bySource: [...bySource.entries()].map(([source, v]) => ({ source, ...v })).sort((a, b) => b.d30 - a.d30)
+  };
+}
+
+// src/lib/metrics.ts
+import { sql as sql5, inArray as inArray2 } from "drizzle-orm";
+function bangkokDay4(offsetDays = 0) {
+  return new Date(Date.now() + offsetDays * 864e5 + 7 * 36e5).toISOString().slice(0, 10);
+}
+var ENGAGEMENT_KINDS = ["wa_click", "tg_click", "phone_click", "email_click", "save", "form_submit"];
+async function metricsSeries(db2, days = 56) {
+  const from = bangkokDay4(-(days - 1));
+  const [views, eng, refs, lds] = await Promise.all([
+    db2.select({ day: objectViewsDaily.day, n: sql5`sum(${objectViewsDaily.views})` }).from(objectViewsDaily).where(sql5`${objectViewsDaily.day} >= ${from}`).groupBy(objectViewsDaily.day),
+    db2.select({ day: objectEventsDaily.day, n: sql5`sum(${objectEventsDaily.count})` }).from(objectEventsDaily).where(sql5`${objectEventsDaily.day} >= ${from} and ${inArray2(objectEventsDaily.kind, ENGAGEMENT_KINDS)}`).groupBy(objectEventsDaily.day),
+    db2.select({ day: referralsDaily.day, n: sql5`sum(${referralsDaily.count})` }).from(referralsDaily).where(sql5`${referralsDaily.day} >= ${from}`).groupBy(referralsDaily.day),
+    db2.select({
+      day: sql5`to_char(${leads.createdAt} at time zone 'Asia/Bangkok', 'YYYY-MM-DD')`,
+      n: sql5`count(*)`
+    }).from(leads).groupBy(sql5`1`)
+  ]);
+  const map = (rows) => new Map(rows.map((r) => [r.day, Number(r.n)]));
+  const vMap = map(views);
+  const eMap = map(eng);
+  const rMap = map(refs);
+  const lMap = map(lds);
+  const out = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const day = bangkokDay4(-i);
+    out.push({
+      day,
+      views: vMap.get(day) ?? 0,
+      engagement: eMap.get(day) ?? 0,
+      visits: rMap.get(day) ?? 0,
+      leads: lMap.get(day) ?? 0
+    });
+  }
+  return out;
+}
 
 // src/lib/articles.ts
-import { eq as eq9, and as and3, desc as desc2, sql as sql5, inArray as inArray2 } from "drizzle-orm";
+import { eq as eq9, and as and4, desc as desc3, sql as sql6, inArray as inArray3 } from "drizzle-orm";
 var ArticleInputError = class extends Error {
 };
 var STATUSES = ["pending", "published", "rejected"];
@@ -2627,9 +2929,9 @@ async function createArticle(db2, input) {
   const lang = input.lang === "ru" ? "ru" : "en";
   let slug = input.slug?.trim() || slugify(title) || `article-${Date.now()}`;
   const existing = await db2.select({ slug: articles.slug }).from(articles).where(
-    and3(
+    and4(
       eq9(articles.lang, lang),
-      sql5`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
+      sql6`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
     )
   );
   if (existing.some((r) => r.slug === slug)) {
@@ -2656,7 +2958,7 @@ async function listArticles(db2, opts = {}) {
   const conds = [];
   if (opts.status) conds.push(eq9(articles.status, opts.status));
   if (opts.lang) conds.push(eq9(articles.lang, opts.lang));
-  return db2.select().from(articles).where(conds.length ? and3(...conds) : void 0).orderBy(desc2(sql5`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
+  return db2.select().from(articles).where(conds.length ? and4(...conds) : void 0).orderBy(desc3(sql6`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
 }
 async function getArticleById(db2, id) {
   const [row] = await db2.select().from(articles).where(eq9(articles.id, id)).limit(1);
@@ -2665,13 +2967,13 @@ async function getArticleById(db2, id) {
 async function getArticleBySlug(db2, slug, lang) {
   const conds = [eq9(articles.slug, slug)];
   if (lang) conds.push(eq9(articles.lang, lang));
-  const [row] = await db2.select().from(articles).where(and3(...conds)).limit(1);
+  const [row] = await db2.select().from(articles).where(and4(...conds)).limit(1);
   return row ?? null;
 }
 async function countPending(db2, lang) {
   const conds = [eq9(articles.status, "pending")];
   if (lang) conds.push(eq9(articles.lang, lang));
-  const [r] = await db2.select({ n: sql5`count(*)::int` }).from(articles).where(and3(...conds));
+  const [r] = await db2.select({ n: sql6`count(*)::int` }).from(articles).where(and4(...conds));
   return r?.n ?? 0;
 }
 async function updateArticle(db2, id, patch) {
@@ -2700,7 +3002,7 @@ async function deleteArticle(db2, id) {
 }
 
 // src/lib/social-posts.ts
-import { eq as eq10, and as and4, desc as desc3 } from "drizzle-orm";
+import { eq as eq10, and as and5, desc as desc4 } from "drizzle-orm";
 var SocialPostInputError = class extends Error {
 };
 var STATUSES2 = ["draft", "scheduled", "published", "rejected"];
@@ -2724,7 +3026,7 @@ async function createSocialPost(db2, input) {
 async function listSocialPosts(db2, opts = {}) {
   const conds = [];
   if (opts.status) conds.push(eq10(socialPosts.status, opts.status));
-  return db2.select().from(socialPosts).where(conds.length ? and4(...conds) : void 0).orderBy(desc3(socialPosts.createdAt)).limit(Math.min(Math.max(opts.limit ?? 50, 1), 200));
+  return db2.select().from(socialPosts).where(conds.length ? and5(...conds) : void 0).orderBy(desc4(socialPosts.createdAt)).limit(Math.min(Math.max(opts.limit ?? 50, 1), 200));
 }
 async function getSocialPostById(db2, id) {
   const [row] = await db2.select().from(socialPosts).where(eq10(socialPosts.id, id)).limit(1);
@@ -2747,7 +3049,7 @@ async function countDraftPosts(db2) {
 }
 
 // src/lib/agent-tasks.ts
-import { eq as eq11, desc as desc4 } from "drizzle-orm";
+import { eq as eq11, desc as desc5 } from "drizzle-orm";
 var AgentTaskInputError = class extends Error {
 };
 var TASK_STATUSES = ["open", "done"];
@@ -2758,7 +3060,7 @@ async function createTask(db2, input) {
   return row;
 }
 async function listTasks2(db2, opts = {}) {
-  return db2.select().from(agentTasks).where(opts.status ? eq11(agentTasks.status, opts.status) : void 0).orderBy(desc4(agentTasks.createdAt)).limit(opts.limit ?? 200);
+  return db2.select().from(agentTasks).where(opts.status ? eq11(agentTasks.status, opts.status) : void 0).orderBy(desc5(agentTasks.createdAt)).limit(opts.limit ?? 200);
 }
 async function getTaskById(db2, id) {
   const [row] = await db2.select().from(agentTasks).where(eq11(agentTasks.id, id)).limit(1);
@@ -2819,7 +3121,7 @@ async function updateSession(db2, id, patch) {
   return row ?? null;
 }
 async function listSessions(db2, opts = {}) {
-  return db2.select().from(councilSessions).where(opts.status ? eq11(councilSessions.status, opts.status) : void 0).orderBy(desc4(councilSessions.createdAt)).limit(opts.limit ?? 20);
+  return db2.select().from(councilSessions).where(opts.status ? eq11(councilSessions.status, opts.status) : void 0).orderBy(desc5(councilSessions.createdAt)).limit(opts.limit ?? 20);
 }
 async function getSessionById(db2, id) {
   const [row] = await db2.select().from(councilSessions).where(eq11(councilSessions.id, id)).limit(1);
@@ -2988,7 +3290,7 @@ ${problems.join("\n")}`,
 }
 
 // src/lib/valuation.ts
-import { eq as eq13, desc as desc5 } from "drizzle-orm";
+import { eq as eq13, desc as desc6 } from "drizzle-orm";
 var ValuationInputError = class extends Error {
 };
 async function listFactorOverrides(db2) {
@@ -3013,7 +3315,7 @@ async function setFactorOverrides(db2, entries) {
 var COMP_TYPES = ["Land", "Villa", "House", "Apartment"];
 var COMP_STATUSES = ["active", "sold", "gone"];
 async function listComps(db2) {
-  return db2.select().from(valuationComps).orderBy(desc5(valuationComps.createdAt));
+  return db2.select().from(valuationComps).orderBy(desc6(valuationComps.createdAt));
 }
 async function addComp(db2, input) {
   const priceThb = Number(input.priceThb);
@@ -3084,11 +3386,11 @@ async function logValuation(db2, input) {
   return row;
 }
 async function listValuations(db2, limit = 20) {
-  return db2.select().from(valuations).orderBy(desc5(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
+  return db2.select().from(valuations).orderBy(desc6(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
 }
 
 // src/lib/ratelimit.ts
-import { sql as sql6 } from "drizzle-orm";
+import { sql as sql7 } from "drizzle-orm";
 import { lt } from "drizzle-orm";
 async function checkRateLimit(db2, key, limit, windowSec) {
   const now = Date.now();
@@ -3096,7 +3398,7 @@ async function checkRateLimit(db2, key, limit, windowSec) {
   const windowStart = new Date(Math.floor(now / windowMs) * windowMs);
   const [row] = await db2.insert(rateLimits).values({ key, windowStart, count: 1 }).onConflictDoUpdate({
     target: [rateLimits.key, rateLimits.windowStart],
-    set: { count: sql6`${rateLimits.count} + 1` }
+    set: { count: sql7`${rateLimits.count} + 1` }
   }).returning({ count: rateLimits.count });
   const count = row?.count ?? 1;
   if (Math.random() < 0.01) {
@@ -3294,8 +3596,8 @@ app.get("/views/cross-shoppers", async (c) => {
 });
 app.post("/track/event", async (c) => {
   try {
-    const { rw, kind } = await c.req.json();
-    const ok = await trackEvent(db, String(rw ?? ""), String(kind ?? ""));
+    const { rw, kind, vid } = await c.req.json();
+    const ok = await trackEvent(db, String(rw ?? ""), String(kind ?? ""), vid ? String(vid) : void 0);
     return c.json({ ok });
   } catch (err) {
     console.error("[POST /track/event]", err.message);
@@ -3307,8 +3609,10 @@ app.get("/events/summary", async (c) => {
 });
 app.post("/track/referral", async (c) => {
   try {
-    const { source } = await c.req.json();
-    const ok = await trackReferral(db, String(source ?? ""));
+    const { source, path } = await c.req.json();
+    const s = String(source ?? "");
+    const ok = await trackReferral(db, s);
+    if (path) await trackAiCitation(db, s, String(path));
     return c.json({ ok });
   } catch (err) {
     console.error("[POST /track/referral]", err.message);
@@ -3317,6 +3621,29 @@ app.post("/track/referral", async (c) => {
 });
 app.get("/referrals/summary", async (c) => {
   return c.json(await referralsSummary(db));
+});
+app.get("/ai-citations/summary", async (c) => {
+  return c.json(await aiCitationsSummary(db));
+});
+app.get("/ai-citations/trend", async (c) => {
+  const days = Number(c.req.query("days") ?? 56);
+  return c.json(await aiCitationsTrend(db, Number.isFinite(days) ? Math.min(days, 180) : 56));
+});
+app.get("/visitors/returning", async (c) => {
+  const days = Number(c.req.query("days") ?? 60);
+  return c.json(await returningVisitors(db, Number.isFinite(days) ? Math.min(days, 180) : 60));
+});
+app.get("/journey/summary", async (c) => {
+  const limit = Number(c.req.query("limit") ?? 30);
+  return c.json(await journeySummary(db, Number.isFinite(limit) ? limit : 30));
+});
+app.get("/leads/hot", async (c) => {
+  const limit = Number(c.req.query("limit") ?? 12);
+  return c.json(await hotOpenLeads(db, Number.isFinite(limit) ? limit : 12));
+});
+app.get("/metrics/series", async (c) => {
+  const days = Number(c.req.query("days") ?? 56);
+  return c.json(await metricsSeries(db, Number.isFinite(days) ? Math.min(days, 180) : 56));
 });
 app.post("/ratelimit", async (c) => {
   const body = await c.req.json().catch(() => ({}));
