@@ -838,3 +838,74 @@ export const rateLimits = pgTable(
     pk: primaryKey({ columns: [t.key, t.windowStart] }),
   }),
 );
+
+// ============================================================
+// Партнёрский пивот (спека пивота, раздел 5): partners — плательщики
+// developer-fee (застройщики/владельцы, которым передаём лидов), referrals —
+// сами передачи лидов партнёрам с гейтом статусов (handed требует ack).
+// Денежных полей (суммы, проценты, fee-цифры) НЕТ НАМЕРЕННО — решение
+// Vladimir 2026-07-03: цифры живут в личном учёте вне продукта. Условия
+// фиксируются словами (fee_milestone) и артефактами (terms_artifact /
+// ack_artifact — где лежит акцепт/ack: скрин, ссылка на переписку).
+// ============================================================
+
+export const partners = pgTable(
+  "partners",
+  {
+    id: serial("id").primaryKey(),
+    slug: text("slug").notNull().unique(),
+    name: text("name").notNull(),
+    contactName: text("contact_name"),
+    messenger: text("messenger"), // канал: tg/line/wa + хэндл
+    linkedRw: text("linked_rw").array(), // RW-номера проектов/объектов партнёра
+    termsStatus: text("terms_status").notNull().default("draft"), // draft | sent | accepted | declined — статус term-sheet
+    termsSentAt: timestamp("terms_sent_at", { withTimezone: true }),
+    termsAcceptedAt: timestamp("terms_accepted_at", { withTimezone: true }),
+    termsArtifact: text("terms_artifact"), // ГДЕ лежит акцепт (скрин/ссылка на переписку) — НЕ цифры и проценты
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    termsStatusIdx: index("partners_terms_status_idx").on(t.termsStatus),
+  }),
+);
+
+export type PartnerRow = typeof partners.$inferSelect;
+export type PartnerInsert = typeof partners.$inferInsert;
+
+export const referrals = pgTable(
+  "referrals",
+  {
+    id: serial("id").primaryKey(),
+    leadId: integer("lead_id")
+      .notNull()
+      .references(() => leads.id),
+    partnerId: integer("partner_id")
+      .notNull()
+      .references(() => partners.id),
+    objectRw: text("object_rw"), // проект/объект передачи
+    status: text("status").notNull().default("teaser_sent"), // teaser_sent | confirmed | handed | viewing | negotiation | closed | lost
+    teaserText: text("teaser_text"), // что отправили (бюджет/сроки/что ищет — БЕЗ имени клиента)
+    teaserSentAt: timestamp("teaser_sent_at", { withTimezone: true }).defaultNow(),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }), // ack партнёра
+    ackArtifact: text("ack_artifact"), // текст/скрин ack — ОБЯЗАТЕЛЕН для перехода в handed
+    handedAt: timestamp("handed_at", { withTimezone: true }),
+    feeMilestone: text("fee_milestone"), // СЛОВАМИ, без цифр: "per partnership terms, due at contract signing"
+    protectionUntil: timestamp("protection_until", { withTimezone: true }), // атрибуция: авто handed_at + 12 мес при переходе в handed
+    nextFollowUp: timestamp("next_follow_up", { withTimezone: true }),
+    lastClientTouch: timestamp("last_client_touch", { withTimezone: true }),
+    verifiedBy: text("verified_by"), // client | partner | inventory-signal — как узнали статус
+    lostReason: text("lost_reason"),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    statusIdx: index("referrals_status_idx").on(t.status),
+    partnerIdx: index("referrals_partner_idx").on(t.partnerId),
+  }),
+);
+
+export type ReferralRow = typeof referrals.$inferSelect;
+export type ReferralInsert = typeof referrals.$inferInsert;
