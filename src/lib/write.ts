@@ -576,7 +576,16 @@ const PATCHABLE = new Set<keyof ObjectInsert>([
   "plotPolygon",
   // eyeball/approx coordinate flag (bulk seed of legacy plots without a survey)
   "coordsApprox",
+  // off-plan лендинг (/projects) — сырой многострочный формат как в createObject
+  "floorplanUrls", "videoUrls", "priceStages", "timeline", "team",
 ]);
+
+/** parsePairs key names per off-plan jsonb column (same as createObject). */
+const PAIR_KEYS = {
+  priceStages: ["label", "value"],
+  timeline: ["date", "event"],
+  team: ["role", "name"],
+} as const;
 
 /** Update whitelisted columns of an object by RW number. */
 export async function updateObject(
@@ -589,6 +598,17 @@ export async function updateObject(
     if (!PATCHABLE.has(k as keyof ObjectInsert)) continue;
     if (k === "plotPolygon") {
       set[k] = v == null ? null : (sanitizePolygon(v) ?? null);
+      continue;
+    }
+    // Off-plan landing fields take the same raw multiline strings as createObject
+    // and get the same coercion — never store the raw string in jsonb. Empty/null clears.
+    if (k === "floorplanUrls" || k === "videoUrls") {
+      set[k] = typeof v === "string" ? parseUrls(v) ?? null : null;
+      continue;
+    }
+    if (k === "priceStages" || k === "timeline" || k === "team") {
+      const [pk, pv] = PAIR_KEYS[k];
+      set[k] = typeof v === "string" ? parsePairs(v, pk, pv) ?? null : null;
       continue;
     }
     set[k] = v;
