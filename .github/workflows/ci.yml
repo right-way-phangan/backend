@@ -1,0 +1,35 @@
+name: CI
+
+# Гейт качества backend: typecheck + тесты + пересборка бандла.
+# Ключевой шаг — bundle-guard: Vercel деплоит ЗАКОММИЧЕННЫЙ api/index.js,
+# рассинхрон бандла с исходниками уходит в прод молча (аудит 2026-07-03:
+# прод отставал на 5 коммитов). Здесь такой рассинхрон падает красным.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Tests
+        run: npm test
+      - name: Build bundle
+        run: npm run build
+      - name: Bundle guard — api/index.js закоммичен свежим
+        run: |
+          git diff --exit-code api/index.js || {
+            echo "::error::api/index.js отстал от исходников — пересобери (npm run build) и закоммить бандл";
+            exit 1;
+          }
