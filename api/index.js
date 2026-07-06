@@ -183,6 +183,9 @@ var objects = pgTable(
     // descriptionRaw and are NOT shown publicly; these are intentional copy.
     descriptionManualEn: text("description_manual_en"),
     descriptionManualRu: text("description_manual_ru"),
+    // Admin-only stale flag: set on all existing objects during actualization.
+    // Once verified current, cleared per-object. Never exposed publicly.
+    needsReview: boolean("needs_review").default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
   },
@@ -773,6 +776,7 @@ function toDomain(row, photos, docs, contacts2 = []) {
     ddDate: u(row.ddDate),
     ddLawyer: u(row.ddLawyer),
     ddChecklist: u(row.ddChecklist),
+    needsReview: row.needsReview ?? void 0,
     outreachStatus: u(row.outreachStatus),
     outreachNote: u(row.outreachNote),
     outreachDate: u(row.outreachDate),
@@ -998,10 +1002,11 @@ async function assembleAll(db2) {
   );
 }
 function stripSellerPii(o) {
-  const { contacts: contacts2, ownerName, docs, ...pub } = o;
+  const { contacts: contacts2, ownerName, docs, needsReview, ...pub } = o;
   void contacts2;
   void ownerName;
   void docs;
+  void needsReview;
   return pub;
 }
 async function getPublicObjects(db2) {
@@ -2360,6 +2365,8 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "ownerName",
   // traced plot contour (admin map editor); null clears
   "plotPolygon",
+  // admin stale flag (actualization workflow)
+  "needsReview",
   // eyeball/approx coordinate flag (bulk seed of legacy plots without a survey)
   "coordsApprox",
   // off-plan лендинг (/projects) — сырой многострочный формат как в createObject
