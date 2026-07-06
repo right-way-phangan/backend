@@ -574,6 +574,8 @@ const PATCHABLE = new Set<keyof ObjectInsert>([
   "outreachStatus", "outreachNote", "outreachDate", "outreachAttempts", "ownerName",
   // traced plot contour (admin map editor); null clears
   "plotPolygon",
+  // admin stale flag (actualization workflow)
+  "needsReview",
   // eyeball/approx coordinate flag (bulk seed of legacy plots without a survey)
   "coordsApprox",
   // off-plan лендинг (/projects) — сырой многострочный формат как в createObject

@@ -159,6 +159,10 @@ export const objects = pgTable(
     descriptionManualEn: text("description_manual_en"),
     descriptionManualRu: text("description_manual_ru"),
 
+    // Admin-only stale flag: set on all existing objects during actualization.
+    // Once verified current, cleared per-object. Never exposed publicly.
+    needsReview: boolean("needs_review").default(false),
+
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

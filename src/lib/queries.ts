@@ -138,10 +138,11 @@ async function assembleAll(db: AnyPgDatabase): Promise<RealEstateObject[]> {
  * for web sanitize.
  */
 function stripSellerPii(o: RealEstateObject): RealEstateObject {
-  const { contacts, ownerName, docs, ...pub } = o;
+  const { contacts, ownerName, docs, needsReview, ...pub } = o;
   void contacts;
   void ownerName;
   void docs;
+  void needsReview;
   return pub;
 }
 
