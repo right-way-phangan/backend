@@ -17,8 +17,8 @@
  *
  * See memory project_contact_bot_and_messenger_links.
  */
-import { eq } from "drizzle-orm";
-import { contactThreads, processedUpdates } from "../db/schema";
+import { and, desc, eq } from "drizzle-orm";
+import { contactMessages, contactThreads, processedUpdates } from "../db/schema";
 import { createLead } from "./crm";
 import type { AnyPgDatabase } from "./load";
 
@@ -48,6 +48,9 @@ const CLIENT_ACK =
 const AI_ENABLED = !!process.env.GROK_API_KEY && process.env.CONTACT_AI_ENABLED !== "0";
 const GROK_API_BASE = (process.env.GROK_API_BASE || "https://api.x.ai/v1").replace(/\/$/, "");
 const GROK_MODEL = process.env.GROK_MODEL || "grok-3-mini";
+const HISTORY_LIMIT = 16; // last N stored turns fed back to the model (~8 exchanges)
+
+type ChatTurn = { role: "user" | "assistant"; content: string };
 
 const SYSTEM_PROMPT =
   "You are the Right Way assistant — the first-line concierge for Right Way " +
@@ -128,12 +131,15 @@ function fullName(u?: TgUser): string {
 }
 
 /**
- * One-shot concierge reply via Grok (xAI). Stateless (system + this message) —
- * safe by construction: the prompt forbids quoting prices/legal and asks the
+ * Concierge reply via Grok (xAI): system prompt + prior turns + this message.
+ * Safe by construction — the prompt forbids quoting prices/legal and asks the
  * model to append `#handoff` when a human should step in. Any failure → null,
  * and the caller falls back to the static greeting/ack.
  */
-async function grokReply(userText: string): Promise<{ reply: string; handoff: boolean } | null> {
+async function grokReply(
+  history: ChatTurn[],
+  userText: string,
+): Promise<{ reply: string; handoff: boolean } | null> {
   const key = process.env.GROK_API_KEY;
   if (!key) return null;
   try {
@@ -146,6 +152,7 @@ async function grokReply(userText: string): Promise<{ reply: string; handoff: bo
         max_tokens: 400,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
+          ...history,
           { role: "user", content: userText },
         ],
       }),
@@ -221,7 +228,21 @@ export async function handleContactUpdate(
         from_chat_id: msg.chat.id,
         message_id: msg.message_id,
       });
-      await tg(cfg, "sendMessage", { chat_id: cfg.ownerId, text: "✅ Отправлено клиенту." }).catch(() => {});
+      // Mark the human takeover: from now on the AI stays silent for this chat.
+      if (AI_ENABLED) {
+        await db
+          .insert(contactMessages)
+          .values({
+            clientChatId: thread.clientChatId,
+            role: "owner",
+            content: (msg.text ?? msg.caption ?? "(reply)").slice(0, 2000),
+          })
+          .catch(() => {});
+      }
+      const ack = AI_ENABLED
+        ? "✅ Отправлено клиенту. Ассистент по этому диалогу отключён — дальше вручную."
+        : "✅ Отправлено клиенту.";
+      await tg(cfg, "sendMessage", { chat_id: cfg.ownerId, text: ack }).catch(() => {});
     } catch (err) {
       await tg(cfg, "sendMessage", {
         chat_id: cfg.ownerId,
@@ -298,10 +319,37 @@ export async function handleContactUpdate(
     console.error("[contact-bot] forward to owner failed:", (err as Error).message);
   }
 
-  // AI concierge: answer the client via Grok when enabled; the owner gets a copy
-  // (with a 🔥 flag when Grok thinks a human should step in). Falls back to the
-  // static greeting/ack when AI is off or the call fails.
-  const ai = AI_ENABLED && text ? await grokReply(text) : null;
+  // AI concierge (Grok): reply with dialogue memory, but only until a human
+  // takes over. Once the owner has relayed anything to this chat (an 'owner'
+  // row), the AI stays silent and we fall back to the static ack. The owner
+  // always gets a copy of the AI reply (🔥 when it flags a hot lead).
+  let ai: { reply: string; handoff: boolean } | null = null;
+  if (AI_ENABLED && text) {
+    const ownerRow = await db
+      .select({ id: contactMessages.id })
+      .from(contactMessages)
+      .where(and(eq(contactMessages.clientChatId, msg.chat.id), eq(contactMessages.role, "owner")))
+      .limit(1);
+    if (ownerRow.length === 0) {
+      const prior = await db
+        .select({ role: contactMessages.role, content: contactMessages.content })
+        .from(contactMessages)
+        .where(eq(contactMessages.clientChatId, msg.chat.id))
+        .orderBy(desc(contactMessages.createdAt))
+        .limit(HISTORY_LIMIT);
+      const history = prior.reverse().map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+      ai = await grokReply(history, text);
+      if (ai) {
+        await db
+          .insert(contactMessages)
+          .values([
+            { clientChatId: msg.chat.id, role: "user", content: text },
+            { clientChatId: msg.chat.id, role: "assistant", content: ai.reply },
+          ])
+          .catch(() => {});
+      }
+    }
+  }
   if (ai) {
     await tg(cfg, "sendMessage", {
       chat_id: cfg.ownerId,
