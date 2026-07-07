@@ -20,7 +20,7 @@ import { getPublicObjects, getAllObjects, scanPhotosForDocuments, purgePhotosByU
 import { recentObjectMatches } from "../lib/matching";
 import { toPublishable, formatPost, type PublishChannel, type PublishLang } from "../lib/publishable";
 import {
-  createObject, updateObject, addObjectPhotos, replaceObjectContacts, ObjectInputError,
+  createObject, updateObject, deleteObject, addObjectPhotos, replaceObjectContacts, ObjectInputError,
 } from "../lib/write";
 import {
   createLead, listLeads, listPipelines, updateLead, seedCrm,
@@ -226,6 +226,17 @@ app.patch("/objects/:rw", async (c) => {
   } catch (err) {
     console.error("[PATCH /objects]", err);
     return c.json({ error: "update failed" }, 500);
+  }
+});
+
+/** Delete an object (admin bulk-delete). Cascades photos/docs/contacts/units. */
+app.delete("/objects/:rw", async (c) => {
+  try {
+    const res = await deleteObject(db, c.req.param("rw"));
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[DELETE /objects/:rw]", err);
+    return c.json({ error: "delete failed" }, 500);
   }
 });
 

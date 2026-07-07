@@ -2403,6 +2403,15 @@ async function updateObject(db2, rwNumber, patch) {
   const [row] = await db2.update(objects).set(set).where(eq4(objects.rwNumber, rwNumber)).returning({ rwNumber: objects.rwNumber });
   return row ?? null;
 }
+async function deleteObject(db2, rwNumber) {
+  const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq4(objects.rwNumber, rwNumber));
+  if (!obj) return null;
+  await db2.delete(objectViewsDaily).where(eq4(objectViewsDaily.rwNumber, rwNumber));
+  await db2.delete(objectEventsDaily).where(eq4(objectEventsDaily.rwNumber, rwNumber));
+  await db2.delete(objectViewVisitors).where(eq4(objectViewVisitors.rwNumber, rwNumber));
+  await db2.delete(objects).where(eq4(objects.id, obj.id));
+  return { rwNumber };
+}
 async function replaceObjectContacts(db2, rwNumber, contacts2) {
   const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq4(objects.rwNumber, rwNumber));
   if (!obj) return null;
@@ -3545,6 +3554,15 @@ app.patch("/objects/:rw", async (c) => {
   } catch (err) {
     console.error("[PATCH /objects]", err);
     return c.json({ error: "update failed" }, 500);
+  }
+});
+app.delete("/objects/:rw", async (c) => {
+  try {
+    const res = await deleteObject(db, c.req.param("rw"));
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("[DELETE /objects/:rw]", err);
+    return c.json({ error: "delete failed" }, 500);
   }
 });
 app.post("/objects/:rw/photos", async (c) => {
