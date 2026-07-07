@@ -8,7 +8,15 @@
  *  - SEO title (template, LLM-polished when ANTHROPIC_API_KEY is set)
  */
 import { eq, sql } from "drizzle-orm";
-import { objects, objectPhotos, objectDocs, objectContacts } from "../db/schema";
+import {
+  objects,
+  objectPhotos,
+  objectDocs,
+  objectContacts,
+  objectViewsDaily,
+  objectEventsDaily,
+  objectViewVisitors,
+} from "../db/schema";
 import { partitionByVetting, type VetVerdict } from "./photo-vetting";
 import type { ObjectInsert } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
@@ -628,6 +636,30 @@ export async function updateObject(
     .where(eq(objects.rwNumber, rwNumber))
     .returning({ rwNumber: objects.rwNumber });
   return row ?? null;
+}
+
+/**
+ * Delete an object by RW number. FK cascades remove its photos / docs /
+ * contacts / project_units; per-object telemetry counters (keyed by rw_number,
+ * not FK) are cleaned here so no orphan rows survive. Business records that
+ * merely reference the number (leads, valuations) are LEFT intact — deleting an
+ * object must not erase CRM history. Returns the RW number or null if absent.
+ * Canonical delete path — used by DELETE /objects/:rw (admin bulk-delete).
+ */
+export async function deleteObject(
+  db: AnyPgDatabase,
+  rwNumber: string,
+): Promise<{ rwNumber: string } | null> {
+  const [obj] = await db
+    .select({ id: objects.id })
+    .from(objects)
+    .where(eq(objects.rwNumber, rwNumber));
+  if (!obj) return null;
+  await db.delete(objectViewsDaily).where(eq(objectViewsDaily.rwNumber, rwNumber));
+  await db.delete(objectEventsDaily).where(eq(objectEventsDaily.rwNumber, rwNumber));
+  await db.delete(objectViewVisitors).where(eq(objectViewVisitors.rwNumber, rwNumber));
+  await db.delete(objects).where(eq(objects.id, obj.id)); // cascades photos/docs/contacts/units
+  return { rwNumber };
 }
 
 /**
