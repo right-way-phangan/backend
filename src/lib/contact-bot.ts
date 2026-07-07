@@ -325,6 +325,7 @@ export async function handleContactUpdate(
   // always gets a copy of the AI reply (🔥 when it flags a hot lead).
   let ai: { reply: string; handoff: boolean } | null = null;
   if (AI_ENABLED && text) {
+   try {
     const ownerRow = await db
       .select({ id: contactMessages.id })
       .from(contactMessages)
@@ -349,6 +350,11 @@ export async function handleContactUpdate(
           .catch(() => {});
       }
     }
+   } catch (err) {
+      // DB/table missing or hiccup → degrade to the plain forwarder (static ack).
+      console.error("[contact-bot] ai step failed:", (err as Error).message);
+      ai = null;
+   }
   }
   if (ai) {
     await tg(cfg, "sendMessage", {

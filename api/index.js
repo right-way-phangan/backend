@@ -3339,18 +3339,23 @@ async function handleContactUpdate(db2, update, cfg) {
   }
   let ai = null;
   if (AI_ENABLED && text2) {
-    const ownerRow = await db2.select({ id: contactMessages.id }).from(contactMessages).where(and7(eq12(contactMessages.clientChatId, msg.chat.id), eq12(contactMessages.role, "owner"))).limit(1);
-    if (ownerRow.length === 0) {
-      const prior = await db2.select({ role: contactMessages.role, content: contactMessages.content }).from(contactMessages).where(eq12(contactMessages.clientChatId, msg.chat.id)).orderBy(desc6(contactMessages.createdAt)).limit(HISTORY_LIMIT);
-      const history2 = prior.reverse().map((m) => ({ role: m.role, content: m.content }));
-      ai = await grokReply(history2, text2);
-      if (ai) {
-        await db2.insert(contactMessages).values([
-          { clientChatId: msg.chat.id, role: "user", content: text2 },
-          { clientChatId: msg.chat.id, role: "assistant", content: ai.reply }
-        ]).catch(() => {
-        });
+    try {
+      const ownerRow = await db2.select({ id: contactMessages.id }).from(contactMessages).where(and7(eq12(contactMessages.clientChatId, msg.chat.id), eq12(contactMessages.role, "owner"))).limit(1);
+      if (ownerRow.length === 0) {
+        const prior = await db2.select({ role: contactMessages.role, content: contactMessages.content }).from(contactMessages).where(eq12(contactMessages.clientChatId, msg.chat.id)).orderBy(desc6(contactMessages.createdAt)).limit(HISTORY_LIMIT);
+        const history2 = prior.reverse().map((m) => ({ role: m.role, content: m.content }));
+        ai = await grokReply(history2, text2);
+        if (ai) {
+          await db2.insert(contactMessages).values([
+            { clientChatId: msg.chat.id, role: "user", content: text2 },
+            { clientChatId: msg.chat.id, role: "assistant", content: ai.reply }
+          ]).catch(() => {
+          });
+        }
       }
+    } catch (err) {
+      console.error("[contact-bot] ai step failed:", err.message);
+      ai = null;
     }
   }
   if (ai) {
