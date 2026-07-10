@@ -91,6 +91,7 @@ export interface RealEstateObject {
   ddDate?: string;
   ddLawyer?: string;
   ddChecklist?: Record<string, boolean>;
+  needsReview?: boolean;
   outreachStatus?: string;
   outreachNote?: string;
   outreachDate?: string;
@@ -209,6 +210,7 @@ export function toDomain(
     ddDate: u(row.ddDate),
     ddLawyer: u(row.ddLawyer),
     ddChecklist: u(row.ddChecklist),
+    needsReview: row.needsReview ?? undefined,
     outreachStatus: u(row.outreachStatus),
     outreachNote: u(row.outreachNote),
     outreachDate: u(row.outreachDate),

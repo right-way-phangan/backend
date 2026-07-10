@@ -10,6 +10,8 @@ import type { AnyPgDatabase } from "./load";
 const PIPELINES = [
   { key: "land", name: "Land", sort: 0 },
   { key: "villa_house", name: "Villas & Houses", sort: 1 },
+  // Supply side: property owners / developers who list WITH us (see OWNER_STAGES).
+  { key: "owners", name: "Собственники", sort: 2 },
   // Imported Circle-era leads land here for manual triage; revived ones are
   // re-created in a working pipeline, dead ones closed in place.
   { key: "legacy", name: "Разбор (legacy)", sort: 9 },
@@ -39,10 +41,29 @@ const LEGACY_STAGES = [
   { key: "dead", name: "Мёртв", sort: 3, isWon: false, isLost: true },
 ] as const;
 
+// Supply-side pipeline for property owners / developers who list WITH us (land
+// or project owners): first contact → sign the listing agreement → collect
+// documents (chanote/title, location, borders — DD L1 «Listing Vetting») →
+// build the listing (catalog object + EN/RU copy + photos) → published across
+// site + other channels. Terminal keys reuse won/lost so the card's
+// Победа/Потеряно buttons and board colouring work unchanged; only the names
+// are owner-specific (Опубликован / Отказ).
+const OWNER_STAGES = [
+  { key: "incoming", name: "Входящий", sort: 0, isWon: false, isLost: false },
+  { key: "contacted", name: "Связались", sort: 1, isWon: false, isLost: false },
+  { key: "agreement", name: "Соглашение", sort: 2, isWon: false, isLost: false },
+  { key: "documents", name: "Документы", sort: 3, isWon: false, isLost: false },
+  { key: "listing", name: "Листинг", sort: 4, isWon: false, isLost: false },
+  { key: "won", name: "Опубликован", sort: 5, isWon: true, isLost: false },
+  { key: "lost", name: "Отказ", sort: 6, isWon: false, isLost: true },
+] as const;
+
 type StageSeed = { key: string; name: string; sort: number; isWon: boolean; isLost: boolean };
 
 function stagesFor(pipelineKey: string): readonly StageSeed[] {
-  return pipelineKey === "legacy" ? LEGACY_STAGES : DEAL_STAGES;
+  if (pipelineKey === "legacy") return LEGACY_STAGES;
+  if (pipelineKey === "owners") return OWNER_STAGES;
+  return DEAL_STAGES;
 }
 
 /**
@@ -81,7 +102,7 @@ export async function seedCrm(db: AnyPgDatabase): Promise<void> {
 
 export interface NewLeadInput {
   leadName: string;
-  pipeline: "land" | "villa_house";
+  pipeline: "land" | "villa_house" | "owners";
   contact: { name: string; email?: string; phone?: string };
   /** Reuse an existing contact row (legacy revive) instead of creating a new one. */
   contactId?: number;
@@ -617,20 +638,15 @@ export async function updateLead(
   if (!lead) return null;
   const set: Record<string, unknown> = { updatedAt: new Date() };
 
-  // Pipeline change: resolve the new pipeline and move to its first stage.
+  // Pipeline change: switch pipeline, then land on its first stage (incoming)
+  // unless a stage is named. stageId/status/timeline event are resolved by the
+  // stage block below — using the NEW pipeline id — so the move is recorded and
+  // "days on stage"/SLA reset instead of counting from the old stage.
   if (patch.pipelineKey) {
     const [newPipe] = await db.select().from(pipelines).where(eq(pipelines.key, patch.pipelineKey));
     if (newPipe && newPipe.id !== lead.pipelineId) {
-      const pipeStages = await db
-        .select()
-        .from(stages)
-        .where(eq(stages.pipelineId, newPipe.id))
-        .orderBy(stages.sort);
-      const targetStageKey = patch.stageKey ?? "incoming";
-      const target = pipeStages.find((s) => s.key === targetStageKey) ?? pipeStages[0];
       set.pipelineId = newPipe.id;
-      if (target) set.stageId = target.id;
-      patch = { ...patch, stageKey: undefined }; // stage already resolved above
+      patch = { ...patch, stageKey: patch.stageKey ?? "incoming" };
     }
   }
 
