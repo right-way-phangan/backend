@@ -1058,6 +1058,8 @@ import { eq as eq2, and, asc, desc, gte, sql } from "drizzle-orm";
 var PIPELINES = [
   { key: "land", name: "Land", sort: 0 },
   { key: "villa_house", name: "Villas & Houses", sort: 1 },
+  // Supply side: property owners / developers who list WITH us (see OWNER_STAGES).
+  { key: "owners", name: "\u0421\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u0438\u043A\u0438", sort: 2 },
   // Imported Circle-era leads land here for manual triage; revived ones are
   // re-created in a working pipeline, dead ones closed in place.
   { key: "legacy", name: "\u0420\u0430\u0437\u0431\u043E\u0440 (legacy)", sort: 9 }
@@ -1081,8 +1083,19 @@ var LEGACY_STAGES = [
   { key: "revived", name: "\u0420\u0435\u0430\u043D\u0438\u043C\u0438\u0440\u043E\u0432\u0430\u043D \u2192 \u0432 \u0440\u0430\u0431\u043E\u0442\u0443", sort: 2, isWon: false, isLost: false },
   { key: "dead", name: "\u041C\u0451\u0440\u0442\u0432", sort: 3, isWon: false, isLost: true }
 ];
+var OWNER_STAGES = [
+  { key: "incoming", name: "\u0412\u0445\u043E\u0434\u044F\u0449\u0438\u0439", sort: 0, isWon: false, isLost: false },
+  { key: "contacted", name: "\u0421\u0432\u044F\u0437\u0430\u043B\u0438\u0441\u044C", sort: 1, isWon: false, isLost: false },
+  { key: "agreement", name: "\u0421\u043E\u0433\u043B\u0430\u0448\u0435\u043D\u0438\u0435", sort: 2, isWon: false, isLost: false },
+  { key: "documents", name: "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u044B", sort: 3, isWon: false, isLost: false },
+  { key: "listing", name: "\u041B\u0438\u0441\u0442\u0438\u043D\u0433", sort: 4, isWon: false, isLost: false },
+  { key: "won", name: "\u041E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u043D", sort: 5, isWon: true, isLost: false },
+  { key: "lost", name: "\u041E\u0442\u043A\u0430\u0437", sort: 6, isWon: false, isLost: true }
+];
 function stagesFor(pipelineKey) {
-  return pipelineKey === "legacy" ? LEGACY_STAGES : DEAL_STAGES;
+  if (pipelineKey === "legacy") return LEGACY_STAGES;
+  if (pipelineKey === "owners") return OWNER_STAGES;
+  return DEAL_STAGES;
 }
 async function seedCrm(db2) {
   for (const p of PIPELINES) {
@@ -1410,12 +1423,8 @@ async function updateLead(db2, id, patch) {
   if (patch.pipelineKey) {
     const [newPipe] = await db2.select().from(pipelines).where(eq2(pipelines.key, patch.pipelineKey));
     if (newPipe && newPipe.id !== lead.pipelineId) {
-      const pipeStages = await db2.select().from(stages).where(eq2(stages.pipelineId, newPipe.id)).orderBy(stages.sort);
-      const targetStageKey = patch.stageKey ?? "incoming";
-      const target = pipeStages.find((s) => s.key === targetStageKey) ?? pipeStages[0];
       set.pipelineId = newPipe.id;
-      if (target) set.stageId = target.id;
-      patch = { ...patch, stageKey: void 0 };
+      patch = { ...patch, stageKey: patch.stageKey ?? "incoming" };
     }
   }
   if (patch.status) set.status = patch.status;
