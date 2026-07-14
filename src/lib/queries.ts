@@ -146,18 +146,36 @@ function stripSellerPii(o: RealEstateObject): RealEstateObject {
   return pub;
 }
 
+/**
+ * A listing carries enough substance to publish: a price — sale OR lease — or a
+ * description. `priceThb` alone misses rent-only leasehold plots (monthly rent
+ * or a lease prepayment, no sale price), which would then stay hidden despite a
+ * cover photo — breaking the "leasehold everywhere" inventory. Pure so it's
+ * unit-tested without a DB.
+ */
+export function hasListingSubstance(o: RealEstateObject): boolean {
+  return (
+    !!o.priceThb ||
+    !!o.pricePerRai ||
+    !!o.rentPerMonth ||
+    !!o.rentPerRaiMonth ||
+    !!o.leasePrepayment ||
+    !!o.descriptionRaw?.trim()
+  );
+}
+
 /** Public listings grid: Active + has a cover photo, premium-first then recent. */
 export async function getPublicObjects(db: AnyPgDatabase): Promise<RealEstateObject[]> {
   const all = await assembleAll(db);
   return all
     .filter((o) => o.rwNumber && o.status === "Active" && !!o.coverImage)
-    // Hide un-enriched intake shells: a listing with neither a price nor any
-    // description is an empty stub (e.g. cold-call-sourced RW-L plots) —
-    // publishing it is thin, near-duplicate content that drags the whole
-    // domain's SEO and disappoints clicks. It stays in /objects/all (admin/CRM)
-    // and reappears here automatically once a price or description is added —
-    // no manual re-listing needed (same pattern as the cover-photo gate above).
-    .filter((o) => !!o.priceThb || !!o.descriptionRaw?.trim())
+    // Hide un-enriched intake shells: a listing with neither a price (sale or
+    // lease) nor any description is an empty stub (e.g. cold-call-sourced RW-L
+    // plots) — publishing it is thin, near-duplicate content that drags the
+    // whole domain's SEO and disappoints clicks. It stays in /objects/all
+    // (admin/CRM) and reappears here automatically once a price or description
+    // is added — no manual re-listing needed (same pattern as the cover gate).
+    .filter(hasListingSubstance)
     .map(stripSellerPii)
     .sort(sortByRecentAndPremium);
 }
