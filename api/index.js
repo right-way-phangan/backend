@@ -1024,9 +1024,12 @@ function stripSellerPii(o) {
   void needsReview;
   return pub;
 }
+function hasListingSubstance(o) {
+  return !!o.priceThb || !!o.pricePerRai || !!o.rentPerMonth || !!o.rentPerRaiMonth || !!o.leasePrepayment || !!o.descriptionRaw?.trim();
+}
 async function getPublicObjects(db2) {
   const all = await assembleAll(db2);
-  return all.filter((o) => o.rwNumber && o.status === "Active" && !!o.coverImage).filter((o) => !!o.priceThb || !!o.descriptionRaw?.trim()).map(stripSellerPii).sort(sortByRecentAndPremium);
+  return all.filter((o) => o.rwNumber && o.status === "Active" && !!o.coverImage).filter(hasListingSubstance).map(stripSellerPii).sort(sortByRecentAndPremium);
 }
 async function assembleUnits(db2) {
   const rows = await db2.select({
