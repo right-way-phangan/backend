@@ -581,6 +581,26 @@ export const contactThreads = pgTable("contact_threads", {
 
 export type ContactThreadRow = typeof contactThreads.$inferSelect;
 
+// Conversation log for the AI concierge (Grok). One row per turn:
+//   role 'user'/'assistant' → dialogue history fed back to the model;
+//   role 'owner'            → the owner relayed a message = human took over,
+//                             so the AI goes silent for that chat afterwards.
+export const contactMessages = pgTable(
+  "contact_messages",
+  {
+    id: serial("id").primaryKey(),
+    clientChatId: bigint("client_chat_id", { mode: "number" }).notNull(),
+    role: text("role").notNull(), // 'user' | 'assistant' | 'owner'
+    content: text("content").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    chatIdx: index("contact_messages_chat_idx").on(t.clientChatId, t.createdAt),
+  }),
+);
+
+export type ContactMessageRow = typeof contactMessages.$inferSelect;
+
 // ============================================================
 // Blog / Journal articles — content pipeline with review-gate.
 // Claude writes a draft (status=pending) → Vladimir approves in /admin/articles
