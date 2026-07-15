@@ -104,6 +104,9 @@ var objects = pgTable(
     leaseEscPeriodYears: doublePrecision("lease_esc_period_years"),
     leaseEscNotes: text("lease_esc_notes"),
     leaseAdditionalTerms: text("lease_additional_terms"),
+    // Lease registered at the Land Office (DD-confirmed). Nullable: null =
+    // unverified, true = registered — the site badges only when true.
+    leaseRegistered: boolean("lease_registered"),
     // Building (villa/house/apartment)
     bedrooms: doublePrecision("bedrooms"),
     bathrooms: doublePrecision("bathrooms"),
@@ -745,6 +748,7 @@ function toDomain(row, photos, docs, contacts2 = []) {
     leaseEscPeriodYears: u(row.leaseEscPeriodYears),
     leaseEscNotes: u(row.leaseEscNotes),
     leaseAdditionalTerms: u(row.leaseAdditionalTerms),
+    leaseRegistered: u(row.leaseRegistered),
     bedrooms: u(row.bedrooms),
     bathrooms: u(row.bathrooms),
     buildYear: u(row.buildYear),
@@ -2384,6 +2388,7 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "ddDate",
   "ddLawyer",
   "ddChecklist",
+  "leaseRegistered",
   // обзвон собственников (admin /admin/outreach); ownerName — инлайн-обогащение
   "outreachStatus",
   "outreachNote",

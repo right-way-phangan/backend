@@ -72,6 +72,9 @@ export const objects = pgTable(
     leaseEscPeriodYears: doublePrecision("lease_esc_period_years"),
     leaseEscNotes: text("lease_esc_notes"),
     leaseAdditionalTerms: text("lease_additional_terms"),
+    // Lease registered at the Land Office (DD-confirmed). Nullable: null =
+    // unverified, true = registered — the site badges only when true.
+    leaseRegistered: boolean("lease_registered"),
 
     // Building (villa/house/apartment)
     bedrooms: doublePrecision("bedrooms"),
