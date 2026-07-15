@@ -69,6 +69,12 @@ const CONTACT_WEBHOOK_SECRET = process.env.TG_CONTACT_WEBHOOK_SECRET;
 const CONTACT_WEBHOOK_URL = "https://rightway-api.vercel.app/telegram/contact";
 const CRON_SECRET = process.env.CRON_SECRET; // Vercel sends it as `Bearer` on cron hits
 
+// Local PGlite work stays frictionless; production must never silently expose
+// the CRM because a deployment missed an environment variable.
+if (ON_VERCEL && (!API_TOKEN || !CRON_SECRET || (CONTACT_BOT && !CONTACT_WEBHOOK_SECRET))) {
+  throw new Error("Missing required production API secret");
+}
+
 const { db, driver, applyMigrations } = await createDb();
 // On Vercel each cold start would otherwise re-run migrate+seed; do them once at
 // deploy instead. Elsewhere (local/VPS) keep auto-migrate so deploy = pull+restart.
