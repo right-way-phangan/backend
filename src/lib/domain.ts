@@ -48,6 +48,7 @@ export interface RealEstateObject {
   leaseEscPeriodYears?: number;
   leaseEscNotes?: string;
   leaseAdditionalTerms?: string;
+  leaseRegistered?: boolean;
   bedrooms?: number;
   bathrooms?: number;
   buildYear?: number;
@@ -164,6 +165,7 @@ export function toDomain(
     leaseEscPeriodYears: u(row.leaseEscPeriodYears),
     leaseEscNotes: u(row.leaseEscNotes),
     leaseAdditionalTerms: u(row.leaseAdditionalTerms),
+    leaseRegistered: u(row.leaseRegistered),
     bedrooms: u(row.bedrooms),
     bathrooms: u(row.bathrooms),
     buildYear: u(row.buildYear),

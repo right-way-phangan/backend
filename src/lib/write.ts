@@ -577,7 +577,7 @@ const PATCHABLE = new Set<keyof ObjectInsert>([
   "bedrooms", "bathrooms", "buildYear", "condition",
   "reasonForSelling", "timeOnMarketMonths",
   // due diligence (admin /admin/dd)
-  "ddStatus", "ddDate", "ddLawyer", "ddChecklist",
+  "ddStatus", "ddDate", "ddLawyer", "ddChecklist", "leaseRegistered",
   // обзвон собственников (admin /admin/outreach); ownerName — инлайн-обогащение
   "outreachStatus", "outreachNote", "outreachDate", "outreachAttempts", "ownerName",
   // traced plot contour (admin map editor); null clears
