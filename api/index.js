@@ -1021,11 +1021,35 @@ async function assembleAll(db2) {
   );
 }
 function stripSellerPii(o) {
-  const { contacts: contacts2, ownerName, docs, needsReview, ...pub } = o;
+  const {
+    contacts: contacts2,
+    ownerName,
+    docs,
+    needsReview,
+    driveFolder,
+    ddLawyer,
+    ddChecklist,
+    outreachStatus,
+    outreachNote,
+    outreachDate,
+    outreachAttempts,
+    reasonForSelling,
+    timeOnMarketMonths,
+    ...pub
+  } = o;
   void contacts2;
   void ownerName;
   void docs;
   void needsReview;
+  void driveFolder;
+  void ddLawyer;
+  void ddChecklist;
+  void outreachStatus;
+  void outreachNote;
+  void outreachDate;
+  void outreachAttempts;
+  void reasonForSelling;
+  void timeOnMarketMonths;
   return pub;
 }
 function hasListingSubstance(o) {
@@ -2224,7 +2248,6 @@ function buildRow(input, rwNumber, title) {
   if (input.description?.trim()) {
     descParts.push("\u0421\u041E\u041E\u0411\u0429\u0415\u041D\u0418\u0415 \u041E\u0422 \u0421\u041E\u0411\u0421\u0422\u0412\u0415\u041D\u041D\u0418\u041A\u0410/\u0411\u0420\u041E\u041A\u0415\u0420\u0410:\n" + input.description.trim());
   }
-  if (input.commission) descParts.push(`\u041A\u041E\u041C\u0418\u0421\u0421\u0418\u042F: ${input.commission}`);
   const row = {
     rwNumber,
     titleEn: title,
@@ -2275,7 +2298,11 @@ function buildRow(input, rwNumber, title) {
     ...parseLatLng(input.locationUrl),
     plotPolygon: sanitizePolygon(input.plotPolygon),
     driveFolder: input.driveFolder,
-    // Pre-composed block (bot) wins; otherwise compose from message + commission.
+    // Комиссия — конфиденциальные условия с продавцом: хранится во внутреннем
+    // outreachNote (вырезается публичным стриппером /objects), НЕ в descriptionRaw,
+    // который уходит в публичный payload.
+    outreachNote: input.commission ? `\u041A\u041E\u041C\u0418\u0421\u0421\u0418\u042F: ${input.commission}` : void 0,
+    // Pre-composed block (bot) wins; otherwise compose from the message only.
     descriptionRaw: input.descriptionRaw?.trim() || (descParts.length ? descParts.join("\n\n") : void 0),
     dateAdded: String(Math.floor(Date.now() / 1e3))
   };
@@ -3230,6 +3257,9 @@ function fullName(u2) {
   if (!u2) return "?";
   return [u2.first_name, u2.last_name].filter(Boolean).join(" ") || (u2.username ?? "?");
 }
+function escMd(s) {
+  return s.replace(/([_*`[])/g, "\\$1");
+}
 async function grokReply(history, userText) {
   const key = process.env.GROK_API_KEY;
   if (!key) return null;
@@ -3350,7 +3380,7 @@ async function handleContactUpdate(db2, update, cfg) {
   const uname = msg.from.username ? `@${msg.from.username}` : "\u2014";
   const label = `${fullName(msg.from)} ${uname}`.trim();
   const header = `\u{1F4E9} *\u041D\u043E\u0432\u044B\u0439 \u043A\u043E\u043D\u0442\u0430\u043A\u0442 \u0441 \u0441\u0430\u0439\u0442\u0430*
-\u041E\u0442: ${fullName(msg.from)} (${uname}, id \`${msg.from.id}\`)${firstContact ? " \xB7 \u{1F195} \u043B\u0438\u0434 \u0437\u0430\u0432\u0435\u0434\u0451\u043D" : ""}
+\u041E\u0442: ${escMd(fullName(msg.from))} (${escMd(uname)}, id \`${msg.from.id}\`)${firstContact ? " \xB7 \u{1F195} \u043B\u0438\u0434 \u0437\u0430\u0432\u0435\u0434\u0451\u043D" : ""}
 \u21A9\uFE0F \u041E\u0442\u0432\u0435\u0442\u044C reply \u043D\u0430 \u044D\u0442\u043E \u0438\u043B\u0438 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435.`;
   try {
     const head = await tg(cfg, "sendMessage", {
