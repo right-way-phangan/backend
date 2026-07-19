@@ -2110,7 +2110,7 @@ function parseArea(areaText) {
   const mRai = s.match(/(\d+(?:[.,]\d+)?)\s*rai\b/i);
   const mNgan = s.match(/(\d+(?:[.,]\d+)?)\s*ngan\b/i);
   const mWah = s.match(/(\d+(?:[.,]\d+)?)\s*sq\.?\s*wah\b/i);
-  const mSqm = s.match(/(\d+(?:[\s,]\d{3})*(?:[.,]\d+)?)\s*m[²2]\b/i);
+  const mSqm = s.match(/(\d+(?:[\s,]\d{3})*(?:[.,]\d+)?)\s*(?:m²|m2\b|sq\.?\s?m)/i);
   const f = (m) => m ? parseFloat(m[1].replace(",", ".").replace(/\s/g, "")) : 0;
   let sqm;
   if (mSqm) {

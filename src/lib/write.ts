@@ -203,7 +203,9 @@ export function parseArea(areaText?: string): { sqm?: number; rai?: number } {
   const mRai = s.match(/(\d+(?:[.,]\d+)?)\s*rai\b/i);
   const mNgan = s.match(/(\d+(?:[.,]\d+)?)\s*ngan\b/i);
   const mWah = s.match(/(\d+(?:[.,]\d+)?)\s*sq\.?\s*wah\b/i);
-  const mSqm = s.match(/(\d+(?:[\s,]\d{3})*(?:[.,]\d+)?)\s*m[²2]\b/i);
+  // `m[²2]\b` не срабатывал на «8400 m²»: JS `\b` — ASCII-only, после не-словесного
+  // `²` границы нет. Явная альтернация единиц (m² / m2 / sqm / sq m / sq.m) вместо `\b`.
+  const mSqm = s.match(/(\d+(?:[\s,]\d{3})*(?:[.,]\d+)?)\s*(?:m²|m2\b|sq\.?\s?m)/i);
   const f = (m: RegExpMatchArray | null) =>
     m ? parseFloat(m[1].replace(",", ".").replace(/\s/g, "")) : 0;
   let sqm: number | undefined;
