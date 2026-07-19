@@ -130,6 +130,12 @@ function fullName(u?: TgUser): string {
   return [u.first_name, u.last_name].filter(Boolean).join(" ") || (u.username ?? "?");
 }
 
+// Экранирование спецсимволов legacy-Markdown: имя/username с «_», «*», «`», «[»
+// иначе ломают parse_mode:"Markdown" (400 can't parse entities) и рвут relay лида.
+function escMd(s: string): string {
+  return s.replace(/([_*`[])/g, "\\$1");
+}
+
 /**
  * Concierge reply via Grok (xAI): system prompt + prior turns + this message.
  * Safe by construction — the prompt forbids quoting prices/legal and asks the
@@ -292,7 +298,7 @@ export async function handleContactUpdate(
   const label = `${fullName(msg.from)} ${uname}`.trim();
   const header =
     `📩 *Новый контакт с сайта*\n` +
-    `От: ${fullName(msg.from)} (${uname}, id \`${msg.from.id}\`)${firstContact ? " · 🆕 лид заведён" : ""}\n` +
+    `От: ${escMd(fullName(msg.from))} (${escMd(uname)}, id \`${msg.from.id}\`)${firstContact ? " · 🆕 лид заведён" : ""}\n` +
     `↩️ Ответь reply на это или следующее сообщение.`;
 
   try {

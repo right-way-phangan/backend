@@ -373,7 +373,6 @@ function buildRow(input: NewObjectInput, rwNumber: string, title: string): Objec
   if (input.description?.trim()) {
     descParts.push("СООБЩЕНИЕ ОТ СОБСТВЕННИКА/БРОКЕРА:\n" + input.description.trim());
   }
-  if (input.commission) descParts.push(`КОМИССИЯ: ${input.commission}`);
 
   const row: ObjectInsert = {
     rwNumber,
@@ -433,7 +432,12 @@ function buildRow(input: NewObjectInput, rwNumber: string, title: string): Objec
     plotPolygon: sanitizePolygon(input.plotPolygon),
     driveFolder: input.driveFolder,
 
-    // Pre-composed block (bot) wins; otherwise compose from message + commission.
+    // Комиссия — конфиденциальные условия с продавцом: хранится во внутреннем
+    // outreachNote (вырезается публичным стриппером /objects), НЕ в descriptionRaw,
+    // который уходит в публичный payload.
+    outreachNote: input.commission ? `КОМИССИЯ: ${input.commission}` : undefined,
+
+    // Pre-composed block (bot) wins; otherwise compose from the message only.
     descriptionRaw:
       input.descriptionRaw?.trim() || (descParts.length ? descParts.join("\n\n") : undefined),
     dateAdded: String(Math.floor(Date.now() / 1000)),
