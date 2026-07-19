@@ -31,6 +31,7 @@ __export(schema_exports, {
   leadNotes: () => leadNotes,
   leadTasks: () => leadTasks,
   leads: () => leads,
+  matchProfiles: () => matchProfiles,
   objectContacts: () => objectContacts,
   objectDocs: () => objectDocs,
   objectEventsDaily: () => objectEventsDaily,
@@ -475,6 +476,21 @@ var leadEvents = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
   },
   (t) => ({ leadIdx: index("lead_events_lead_idx").on(t.leadId) })
+);
+var matchProfiles = pgTable(
+  "match_profiles",
+  {
+    id: serial("id").primaryKey(),
+    leadId: integer("lead_id").references(() => leads.id, { onDelete: "set null" }),
+    contactId: integer("contact_id").references(() => contacts.id, { onDelete: "set null" }),
+    profile: jsonb("profile").$type().notNull(),
+    lang: text("lang"),
+    // en | ru
+    active: boolean("active").notNull().default(true),
+    lastMatchedAt: timestamp("last_matched_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({ activeIdx: index("match_profiles_active_idx").on(t.active) })
 );
 var contactThreads = pgTable("contact_threads", {
   ownerMsgId: bigint("owner_msg_id", { mode: "number" }).primaryKey(),
@@ -1582,6 +1598,74 @@ async function recentObjectMatches(db2, hours = 24) {
   return out.sort((a, b) => b.matchCount - a.matchCount);
 }
 
+// src/lib/match-profiles.ts
+import { and as and3, eq as eq4, gte as gte3 } from "drizzle-orm";
+function acquisitionValue(o) {
+  if (o.priceThb) return o.priceThb;
+  if (o.rentPerMonth && o.leaseTermYears) return o.rentPerMonth * 12 * o.leaseTermYears;
+  return null;
+}
+var VILLA_TYPES2 = /* @__PURE__ */ new Set(["Villa", "House", "Apartment", "Project"]);
+function profileMatchesObject(p, o) {
+  if (p.type?.length) {
+    const ok = p.type.includes(o.type) || o.type === "Project" && p.type.some((t) => VILLA_TYPES2.has(t));
+    if (!ok) return false;
+  }
+  if (p.districts?.length && (!o.district || !p.districts.includes(o.district))) return false;
+  if (p.tenure?.length) {
+    const owned = new Set(o.tenure ?? []);
+    if (!p.tenure.some((t) => owned.has(t))) return false;
+  }
+  if (p.bedroomsMin && (o.bedrooms ?? 0) < p.bedroomsMin) return false;
+  if (p.budgetMaxMThb) {
+    const v = acquisitionValue(o);
+    if (v && v > p.budgetMaxMThb * 1e6 * 1.1) return false;
+  }
+  if (p.mustHaves?.includes("beachfront") && !o.beachfront) return false;
+  if (p.mustHaves?.includes("seaView") && !o.seaView && !o.beachfront) return false;
+  return true;
+}
+async function createMatchProfile(db2, input) {
+  const [row] = await db2.insert(matchProfiles).values({
+    leadId: input.leadId,
+    contactId: input.contactId,
+    profile: input.profile,
+    lang: input.lang
+  }).returning({ id: matchProfiles.id });
+  return row?.id ?? 0;
+}
+async function getMatchProfile(db2, id) {
+  const [row] = await db2.select().from(matchProfiles).where(eq4(matchProfiles.id, id)).limit(1);
+  return row ?? null;
+}
+async function deactivateMatchProfile(db2, id) {
+  await db2.update(matchProfiles).set({ active: false }).where(eq4(matchProfiles.id, id));
+}
+async function newMatchesForProfiles(db2, hours = 24) {
+  const since = new Date(Date.now() - hours * 36e5);
+  const recent = await db2.select().from(objects).where(and3(eq4(objects.status, "Active"), gte3(objects.createdAt, since)));
+  if (recent.length === 0) return [];
+  const profiles = await db2.select().from(matchProfiles).where(eq4(matchProfiles.active, true));
+  const out = [];
+  for (const pr of profiles) {
+    const p = pr.profile ?? {};
+    const matched = recent.filter((o) => profileMatchesObject(p, o));
+    if (matched.length === 0) continue;
+    out.push({
+      profileId: pr.id,
+      leadId: pr.leadId,
+      lang: pr.lang,
+      newObjects: matched.slice(0, 8).map((o) => ({
+        rwNumber: o.rwNumber,
+        title: o.titleEn,
+        type: o.type,
+        district: o.district
+      }))
+    });
+  }
+  return out;
+}
+
 // src/lib/publishable.ts
 var ConfidentialLeakError = class extends Error {
   constructor(message) {
@@ -1806,7 +1890,7 @@ function formatPost(r) {
 }
 
 // src/lib/write.ts
-import { eq as eq4, sql as sql2 } from "drizzle-orm";
+import { eq as eq5, sql as sql2 } from "drizzle-orm";
 
 // src/lib/object-title.ts
 function seed(s) {
@@ -2355,12 +2439,12 @@ async function createObject(db2, input) {
 }
 async function addObjectPhotos(db2, rwNumber, urls) {
   const clean2 = urls.map((u2) => String(u2).trim()).filter((u2) => /^https?:\/\//i.test(u2));
-  const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq4(objects.rwNumber, rwNumber));
+  const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq5(objects.rwNumber, rwNumber));
   if (!obj) return null;
   if (clean2.length === 0) return { rwNumber, added: 0, coverSet: false, rejected: [] };
   const { accepted, rejected } = await partitionByVetting(clean2);
   if (accepted.length === 0) return { rwNumber, added: 0, coverSet: false, rejected };
-  const existing = await db2.select({ sort: objectPhotos.sort }).from(objectPhotos).where(eq4(objectPhotos.objectId, obj.id));
+  const existing = await db2.select({ sort: objectPhotos.sort }).from(objectPhotos).where(eq5(objectPhotos.objectId, obj.id));
   const hadPhotos = existing.length > 0;
   const startSort = existing.reduce((m, r) => Math.max(m, r.sort + 1), 0);
   await db2.insert(objectPhotos).values(
@@ -2371,7 +2455,7 @@ async function addObjectPhotos(db2, rwNumber, urls) {
       isCover: !hadPhotos && i === 0
     }))
   );
-  await db2.update(objects).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq4(objects.id, obj.id));
+  await db2.update(objects).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq5(objects.id, obj.id));
   return { rwNumber, added: accepted.length, coverSet: !hadPhotos, rejected };
 }
 var PATCHABLE = /* @__PURE__ */ new Set([
@@ -2466,25 +2550,25 @@ async function updateObject(db2, rwNumber, patch) {
       set.lng = ll.lng;
     }
   }
-  const [row] = await db2.update(objects).set(set).where(eq4(objects.rwNumber, rwNumber)).returning({ rwNumber: objects.rwNumber });
+  const [row] = await db2.update(objects).set(set).where(eq5(objects.rwNumber, rwNumber)).returning({ rwNumber: objects.rwNumber });
   return row ?? null;
 }
 async function deleteObject(db2, rwNumber) {
-  const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq4(objects.rwNumber, rwNumber));
+  const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq5(objects.rwNumber, rwNumber));
   if (!obj) return null;
-  await db2.delete(objectViewsDaily).where(eq4(objectViewsDaily.rwNumber, rwNumber));
-  await db2.delete(objectEventsDaily).where(eq4(objectEventsDaily.rwNumber, rwNumber));
-  await db2.delete(objectViewVisitors).where(eq4(objectViewVisitors.rwNumber, rwNumber));
-  await db2.delete(objects).where(eq4(objects.id, obj.id));
+  await db2.delete(objectViewsDaily).where(eq5(objectViewsDaily.rwNumber, rwNumber));
+  await db2.delete(objectEventsDaily).where(eq5(objectEventsDaily.rwNumber, rwNumber));
+  await db2.delete(objectViewVisitors).where(eq5(objectViewVisitors.rwNumber, rwNumber));
+  await db2.delete(objects).where(eq5(objects.id, obj.id));
   return { rwNumber };
 }
 async function replaceObjectContacts(db2, rwNumber, contacts2) {
-  const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq4(objects.rwNumber, rwNumber));
+  const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq5(objects.rwNumber, rwNumber));
   if (!obj) return null;
   const rows = (Array.isArray(contacts2) ? contacts2 : []).map((c, i) => contactRowValues(c, obj.id, i)).filter((r) => r != null);
   if (rows.length && !rows.some((r) => r.isPrimary)) rows[0].isPrimary = true;
   await db2.transaction(async (tx) => {
-    await tx.delete(objectContacts).where(eq4(objectContacts.objectId, obj.id));
+    await tx.delete(objectContacts).where(eq5(objectContacts.objectId, obj.id));
     if (rows.length) await tx.insert(objectContacts).values(rows);
   });
   return rows.map((r) => ({
@@ -2501,9 +2585,9 @@ async function replaceObjectContacts(db2, rwNumber, contacts2) {
 
 // src/lib/auth.ts
 import bcrypt from "bcryptjs";
-import { eq as eq5 } from "drizzle-orm";
+import { eq as eq6 } from "drizzle-orm";
 async function verifyLogin(db2, email, password) {
-  const [u2] = await db2.select().from(users).where(eq5(users.email, email.trim().toLowerCase()));
+  const [u2] = await db2.select().from(users).where(eq6(users.email, email.trim().toLowerCase()));
   if (!u2) return null;
   const ok = await bcrypt.compare(password, u2.passwordHash);
   if (!ok) return null;
@@ -2511,9 +2595,9 @@ async function verifyLogin(db2, email, password) {
 }
 
 // src/lib/settings.ts
-import { eq as eq6 } from "drizzle-orm";
+import { eq as eq7 } from "drizzle-orm";
 async function getSetting(db2, key) {
-  const [row] = await db2.select({ value: appSettings.value }).from(appSettings).where(eq6(appSettings.key, key));
+  const [row] = await db2.select({ value: appSettings.value }).from(appSettings).where(eq7(appSettings.key, key));
   return row?.value ?? null;
 }
 async function listSettings(db2) {
@@ -2522,14 +2606,14 @@ async function listSettings(db2) {
 }
 async function setSetting(db2, key, value) {
   if (value == null || value === "") {
-    await db2.delete(appSettings).where(eq6(appSettings.key, key));
+    await db2.delete(appSettings).where(eq7(appSettings.key, key));
     return;
   }
   await db2.insert(appSettings).values({ key, value, updatedAt: /* @__PURE__ */ new Date() }).onConflictDoUpdate({ target: appSettings.key, set: { value, updatedAt: /* @__PURE__ */ new Date() } });
 }
 
 // src/lib/demand.ts
-import { gte as gte3 } from "drizzle-orm";
+import { gte as gte4 } from "drizzle-orm";
 function bangkokDay(offsetDays = 0) {
   return new Date(Date.now() + 7 * 36e5 + offsetDays * 864e5).toISOString().slice(0, 10);
 }
@@ -2565,7 +2649,7 @@ function tally(map) {
 }
 async function demandSummary(db2, windowDays = 90) {
   const since = new Date(Date.now() - windowDays * 864e5);
-  const rows = await db2.select().from(searchEvents).where(gte3(searchEvents.createdAt, since));
+  const rows = await db2.select().from(searchEvents).where(gte4(searchEvents.createdAt, since));
   const districts = /* @__PURE__ */ new Map();
   const types = /* @__PURE__ */ new Map();
   const tenure = /* @__PURE__ */ new Map();
@@ -2640,12 +2724,12 @@ async function demandSummary(db2, windowDays = 90) {
 }
 
 // src/lib/views.ts
-import { eq as eq7, sql as sql3 } from "drizzle-orm";
+import { eq as eq8, sql as sql3 } from "drizzle-orm";
 function bangkokDay2(offsetDays = 0) {
   return new Date(Date.now() + 7 * 36e5 + offsetDays * 864e5).toISOString().slice(0, 10);
 }
 async function trackView(db2, rwNumber, vid) {
-  const found = await db2.select({ id: objects.id }).from(objects).where(eq7(objects.rwNumber, rwNumber)).limit(1);
+  const found = await db2.select({ id: objects.id }).from(objects).where(eq8(objects.rwNumber, rwNumber)).limit(1);
   if (found.length === 0) return false;
   const day = bangkokDay2();
   await db2.insert(objectViewsDaily).values({ rwNumber, day, views: 1 }).onConflictDoUpdate({
@@ -2688,7 +2772,7 @@ async function crossShopperCount(db2) {
 }
 
 // src/lib/events.ts
-import { eq as eq8, sql as sql4, and as and3, desc as desc2, lte } from "drizzle-orm";
+import { eq as eq9, sql as sql4, and as and4, desc as desc2, lte } from "drizzle-orm";
 var SITE = "__site__";
 var OBJECT_KINDS = /* @__PURE__ */ new Set([
   "wa_click",
@@ -2730,7 +2814,7 @@ async function trackEvent(db2, rwNumber, kind, vid) {
     if (!SITE_KINDS.has(kind)) return false;
   } else {
     if (!OBJECT_KINDS.has(kind)) return false;
-    const found = await db2.select({ id: objects.id }).from(objects).where(eq8(objects.rwNumber, rw)).limit(1);
+    const found = await db2.select({ id: objects.id }).from(objects).where(eq9(objects.rwNumber, rw)).limit(1);
     if (found.length === 0) return false;
   }
   await db2.insert(objectEventsDaily).values({ rwNumber: rw, kind, day: bangkokDay3(), count: 1 }).onConflictDoUpdate({
@@ -2817,11 +2901,11 @@ async function journeySummary(db2, limit = 30) {
   let viewsSum = 0;
   for (const l of withVid.slice(0, Math.max(limit, 40))) {
     const vid = l.vid;
-    const views = await db2.select({ rw: objectViewVisitors.rwNumber }).from(objectViewVisitors).where(eq8(objectViewVisitors.vid, vid));
+    const views = await db2.select({ rw: objectViewVisitors.rwNumber }).from(objectViewVisitors).where(eq9(objectViewVisitors.vid, vid));
     const viewedRw = [...new Set(views.map((v) => v.rw))];
     viewsSum += viewedRw.length;
     for (const rw of viewedRw) objCount.set(rw, (objCount.get(rw) ?? 0) + 1);
-    const acts = await db2.select({ kind: visitorEvents.kind, rwNumber: visitorEvents.rwNumber, ts: visitorEvents.ts }).from(visitorEvents).where(and3(eq8(visitorEvents.vid, vid), lte(visitorEvents.ts, l.createdAt))).orderBy(visitorEvents.ts);
+    const acts = await db2.select({ kind: visitorEvents.kind, rwNumber: visitorEvents.rwNumber, ts: visitorEvents.ts }).from(visitorEvents).where(and4(eq9(visitorEvents.vid, vid), lte(visitorEvents.ts, l.createdAt))).orderBy(visitorEvents.ts);
     if (recent.length < limit) {
       recent.push({
         leadId: l.id,
@@ -2860,13 +2944,13 @@ var ACTION_WEIGHTS = {
   contact_reach: 2
 };
 async function hotOpenLeads(db2, limit = 12) {
-  const open = await db2.select({ id: leads.id, name: leads.name, createdAt: leads.createdAt, rwNumber: leads.rwNumber, vid: leads.vid }).from(leads).where(and3(eq8(leads.status, "open"), sql4`${leads.vid} is not null`)).orderBy(desc2(leads.createdAt)).limit(200);
+  const open = await db2.select({ id: leads.id, name: leads.name, createdAt: leads.createdAt, rwNumber: leads.rwNumber, vid: leads.vid }).from(leads).where(and4(eq9(leads.status, "open"), sql4`${leads.vid} is not null`)).orderBy(desc2(leads.createdAt)).limit(200);
   const out = [];
   for (const l of open) {
     const vid = l.vid;
-    const views = await db2.select({ rw: objectViewVisitors.rwNumber }).from(objectViewVisitors).where(eq8(objectViewVisitors.vid, vid));
+    const views = await db2.select({ rw: objectViewVisitors.rwNumber }).from(objectViewVisitors).where(eq9(objectViewVisitors.vid, vid));
     const viewedCount = new Set(views.map((v) => v.rw)).size;
-    const acts = await db2.select({ kind: visitorEvents.kind }).from(visitorEvents).where(eq8(visitorEvents.vid, vid));
+    const acts = await db2.select({ kind: visitorEvents.kind }).from(visitorEvents).where(eq9(visitorEvents.vid, vid));
     const counts = /* @__PURE__ */ new Map();
     for (const a of acts) counts.set(a.kind, (counts.get(a.kind) ?? 0) + 1);
     let score = viewedCount * 3;
@@ -3003,7 +3087,7 @@ async function metricsSeries(db2, days = 56) {
 }
 
 // src/lib/articles.ts
-import { eq as eq9, and as and4, desc as desc3, sql as sql6, inArray as inArray3 } from "drizzle-orm";
+import { eq as eq10, and as and5, desc as desc3, sql as sql6, inArray as inArray3 } from "drizzle-orm";
 var ArticleInputError = class extends Error {
 };
 var STATUSES = ["pending", "published", "rejected"];
@@ -3024,8 +3108,8 @@ async function createArticle(db2, input) {
   const lang = input.lang === "ru" ? "ru" : "en";
   let slug = input.slug?.trim() || slugify(title) || `article-${Date.now()}`;
   const existing = await db2.select({ slug: articles.slug }).from(articles).where(
-    and4(
-      eq9(articles.lang, lang),
+    and5(
+      eq10(articles.lang, lang),
       sql6`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
     )
   );
@@ -3051,24 +3135,24 @@ async function createArticle(db2, input) {
 }
 async function listArticles(db2, opts = {}) {
   const conds = [];
-  if (opts.status) conds.push(eq9(articles.status, opts.status));
-  if (opts.lang) conds.push(eq9(articles.lang, opts.lang));
-  return db2.select().from(articles).where(conds.length ? and4(...conds) : void 0).orderBy(desc3(sql6`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
+  if (opts.status) conds.push(eq10(articles.status, opts.status));
+  if (opts.lang) conds.push(eq10(articles.lang, opts.lang));
+  return db2.select().from(articles).where(conds.length ? and5(...conds) : void 0).orderBy(desc3(sql6`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
 }
 async function getArticleById(db2, id) {
-  const [row] = await db2.select().from(articles).where(eq9(articles.id, id)).limit(1);
+  const [row] = await db2.select().from(articles).where(eq10(articles.id, id)).limit(1);
   return row ?? null;
 }
 async function getArticleBySlug(db2, slug, lang) {
-  const conds = [eq9(articles.slug, slug)];
-  if (lang) conds.push(eq9(articles.lang, lang));
-  const [row] = await db2.select().from(articles).where(and4(...conds)).limit(1);
+  const conds = [eq10(articles.slug, slug)];
+  if (lang) conds.push(eq10(articles.lang, lang));
+  const [row] = await db2.select().from(articles).where(and5(...conds)).limit(1);
   return row ?? null;
 }
 async function countPending(db2, lang) {
-  const conds = [eq9(articles.status, "pending")];
-  if (lang) conds.push(eq9(articles.lang, lang));
-  const [r] = await db2.select({ n: sql6`count(*)::int` }).from(articles).where(and4(...conds));
+  const conds = [eq10(articles.status, "pending")];
+  if (lang) conds.push(eq10(articles.lang, lang));
+  const [r] = await db2.select({ n: sql6`count(*)::int` }).from(articles).where(and5(...conds));
   return r?.n ?? 0;
 }
 async function updateArticle(db2, id, patch) {
@@ -3088,16 +3172,16 @@ async function updateArticle(db2, id, patch) {
   }
   if (patch.takeaways !== void 0) set.takeaways = patch.takeaways;
   if (patch.coverImage !== void 0) set.coverImage = patch.coverImage;
-  const [row] = await db2.update(articles).set(set).where(eq9(articles.id, id)).returning();
+  const [row] = await db2.update(articles).set(set).where(eq10(articles.id, id)).returning();
   return row ?? null;
 }
 async function deleteArticle(db2, id) {
-  const res = await db2.delete(articles).where(eq9(articles.id, id)).returning({ id: articles.id });
+  const res = await db2.delete(articles).where(eq10(articles.id, id)).returning({ id: articles.id });
   return res.length > 0;
 }
 
 // src/lib/social-posts.ts
-import { eq as eq10, and as and5, desc as desc4 } from "drizzle-orm";
+import { eq as eq11, and as and6, desc as desc4 } from "drizzle-orm";
 var SocialPostInputError = class extends Error {
 };
 var STATUSES2 = ["draft", "scheduled", "published", "rejected"];
@@ -3120,11 +3204,11 @@ async function createSocialPost(db2, input) {
 }
 async function listSocialPosts(db2, opts = {}) {
   const conds = [];
-  if (opts.status) conds.push(eq10(socialPosts.status, opts.status));
-  return db2.select().from(socialPosts).where(conds.length ? and5(...conds) : void 0).orderBy(desc4(socialPosts.createdAt)).limit(Math.min(Math.max(opts.limit ?? 50, 1), 200));
+  if (opts.status) conds.push(eq11(socialPosts.status, opts.status));
+  return db2.select().from(socialPosts).where(conds.length ? and6(...conds) : void 0).orderBy(desc4(socialPosts.createdAt)).limit(Math.min(Math.max(opts.limit ?? 50, 1), 200));
 }
 async function getSocialPostById(db2, id) {
-  const [row] = await db2.select().from(socialPosts).where(eq10(socialPosts.id, id)).limit(1);
+  const [row] = await db2.select().from(socialPosts).where(eq11(socialPosts.id, id)).limit(1);
   return row ?? null;
 }
 async function updateSocialPost(db2, id, patch) {
@@ -3135,16 +3219,16 @@ async function updateSocialPost(db2, id, patch) {
   }
   if (typeof patch.reviewerNote === "string") set.reviewerNote = patch.reviewerNote;
   if (typeof patch.body === "string" && patch.body.trim()) set.body = patch.body.trim();
-  const [row] = await db2.update(socialPosts).set(set).where(eq10(socialPosts.id, id)).returning();
+  const [row] = await db2.update(socialPosts).set(set).where(eq11(socialPosts.id, id)).returning();
   return row ?? null;
 }
 async function countDraftPosts(db2) {
-  const rows = await db2.select({ id: socialPosts.id }).from(socialPosts).where(eq10(socialPosts.status, "draft"));
+  const rows = await db2.select({ id: socialPosts.id }).from(socialPosts).where(eq11(socialPosts.status, "draft"));
   return rows.length;
 }
 
 // src/lib/agent-tasks.ts
-import { eq as eq11, desc as desc5 } from "drizzle-orm";
+import { eq as eq12, desc as desc5 } from "drizzle-orm";
 var AgentTaskInputError = class extends Error {
 };
 var TASK_STATUSES = ["open", "done"];
@@ -3155,14 +3239,14 @@ async function createTask(db2, input) {
   return row;
 }
 async function listTasks2(db2, opts = {}) {
-  return db2.select().from(agentTasks).where(opts.status ? eq11(agentTasks.status, opts.status) : void 0).orderBy(desc5(agentTasks.createdAt)).limit(opts.limit ?? 200);
+  return db2.select().from(agentTasks).where(opts.status ? eq12(agentTasks.status, opts.status) : void 0).orderBy(desc5(agentTasks.createdAt)).limit(opts.limit ?? 200);
 }
 async function getTaskById(db2, id) {
-  const [row] = await db2.select().from(agentTasks).where(eq11(agentTasks.id, id)).limit(1);
+  const [row] = await db2.select().from(agentTasks).where(eq12(agentTasks.id, id)).limit(1);
   return row ?? null;
 }
 async function countOpenTasks(db2) {
-  const rows = await db2.select({ id: agentTasks.id }).from(agentTasks).where(eq11(agentTasks.status, "open"));
+  const rows = await db2.select({ id: agentTasks.id }).from(agentTasks).where(eq12(agentTasks.status, "open"));
   return rows.length;
 }
 async function updateTask2(db2, id, patch) {
@@ -3177,11 +3261,11 @@ async function updateTask2(db2, id, patch) {
     set.text = t;
   }
   if (Object.keys(set).length === 0) return getTaskById(db2, id);
-  const [row] = await db2.update(agentTasks).set(set).where(eq11(agentTasks.id, id)).returning();
+  const [row] = await db2.update(agentTasks).set(set).where(eq12(agentTasks.id, id)).returning();
   return row ?? null;
 }
 async function deleteTask(db2, id) {
-  const res = await db2.delete(agentTasks).where(eq11(agentTasks.id, id)).returning({ id: agentTasks.id });
+  const res = await db2.delete(agentTasks).where(eq12(agentTasks.id, id)).returning({ id: agentTasks.id });
   return res.length > 0;
 }
 async function createSession(db2, input) {
@@ -3212,19 +3296,19 @@ async function updateSession(db2, id, patch) {
   if (patch.answer !== void 0) set.answer = patch.answer;
   if (patch.errorText !== void 0) set.errorText = patch.errorText;
   if (Object.keys(set).length === 0) return getSessionById(db2, id);
-  const [row] = await db2.update(councilSessions).set(set).where(eq11(councilSessions.id, id)).returning();
+  const [row] = await db2.update(councilSessions).set(set).where(eq12(councilSessions.id, id)).returning();
   return row ?? null;
 }
 async function listSessions(db2, opts = {}) {
-  return db2.select().from(councilSessions).where(opts.status ? eq11(councilSessions.status, opts.status) : void 0).orderBy(desc5(councilSessions.createdAt)).limit(opts.limit ?? 20);
+  return db2.select().from(councilSessions).where(opts.status ? eq12(councilSessions.status, opts.status) : void 0).orderBy(desc5(councilSessions.createdAt)).limit(opts.limit ?? 20);
 }
 async function getSessionById(db2, id) {
-  const [row] = await db2.select().from(councilSessions).where(eq11(councilSessions.id, id)).limit(1);
+  const [row] = await db2.select().from(councilSessions).where(eq12(councilSessions.id, id)).limit(1);
   return row ?? null;
 }
 
 // src/lib/contact-bot.ts
-import { and as and7, desc as desc6, eq as eq12 } from "drizzle-orm";
+import { and as and8, desc as desc6, eq as eq13 } from "drizzle-orm";
 var SITE2 = "https://rightwaygroup.co";
 var FLOOD_WINDOW_MS = 6e4;
 var FLOOD_MAX = 16;
@@ -3314,7 +3398,7 @@ async function handleContactUpdate(db2, update, cfg) {
   if (!msg || !msg.from || msg.from.is_bot) return;
   if (msg.from.id === cfg.ownerId) {
     if (!msg.reply_to_message) return;
-    const rows = await db2.select().from(contactThreads).where(eq12(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
+    const rows = await db2.select().from(contactThreads).where(eq13(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
     const thread = rows[0];
     if (!thread) {
       await tg(cfg, "sendMessage", {
@@ -3365,7 +3449,7 @@ async function handleContactUpdate(db2, update, cfg) {
       return;
     }
   }
-  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq12(contactThreads.clientChatId, msg.chat.id));
+  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq13(contactThreads.clientChatId, msg.chat.id));
   const firstContact = history.length === 0;
   const cutoff = new Date(Date.now() - FLOOD_WINDOW_MS);
   const recent = history.filter((h2) => h2.createdAt > cutoff).length;
@@ -3403,9 +3487,9 @@ async function handleContactUpdate(db2, update, cfg) {
   let ai = null;
   if (AI_ENABLED && text2) {
     try {
-      const ownerRow = await db2.select({ id: contactMessages.id }).from(contactMessages).where(and7(eq12(contactMessages.clientChatId, msg.chat.id), eq12(contactMessages.role, "owner"))).limit(1);
+      const ownerRow = await db2.select({ id: contactMessages.id }).from(contactMessages).where(and8(eq13(contactMessages.clientChatId, msg.chat.id), eq13(contactMessages.role, "owner"))).limit(1);
       if (ownerRow.length === 0) {
-        const prior = await db2.select({ role: contactMessages.role, content: contactMessages.content }).from(contactMessages).where(eq12(contactMessages.clientChatId, msg.chat.id)).orderBy(desc6(contactMessages.createdAt)).limit(HISTORY_LIMIT);
+        const prior = await db2.select({ role: contactMessages.role, content: contactMessages.content }).from(contactMessages).where(eq13(contactMessages.clientChatId, msg.chat.id)).orderBy(desc6(contactMessages.createdAt)).limit(HISTORY_LIMIT);
         const history2 = prior.reverse().map((m) => ({ role: m.role, content: m.content }));
         ai = await grokReply(history2, text2);
         if (ai) {
@@ -3461,7 +3545,7 @@ ${problems.join("\n")}`,
 }
 
 // src/lib/valuation.ts
-import { eq as eq13, desc as desc7 } from "drizzle-orm";
+import { eq as eq14, desc as desc7 } from "drizzle-orm";
 var ValuationInputError = class extends Error {
 };
 async function listFactorOverrides(db2) {
@@ -3472,7 +3556,7 @@ async function setFactorOverrides(db2, entries) {
     const key = String(e.key ?? "").trim();
     if (!key) throw new ValuationInputError("factor key is required");
     if (e.value === null) {
-      await db2.delete(valuationFactors).where(eq13(valuationFactors.key, key));
+      await db2.delete(valuationFactors).where(eq14(valuationFactors.key, key));
       continue;
     }
     const value = Number(e.value);
@@ -3531,11 +3615,11 @@ async function updateComp(db2, id, patch) {
   }
   if (patch.note !== void 0) set.note = patch.note?.trim() || null;
   if (Object.keys(set).length === 0) return null;
-  const [row] = await db2.update(valuationComps).set(set).where(eq13(valuationComps.id, id)).returning();
+  const [row] = await db2.update(valuationComps).set(set).where(eq14(valuationComps.id, id)).returning();
   return row ?? null;
 }
 async function deleteComp(db2, id) {
-  const rows = await db2.delete(valuationComps).where(eq13(valuationComps.id, id)).returning();
+  const rows = await db2.delete(valuationComps).where(eq14(valuationComps.id, id)).returning();
   return rows.length > 0;
 }
 async function logValuation(db2, input) {
@@ -3659,6 +3743,33 @@ app.get("/objects/all", async (c) => {
 app.get("/objects/recent-matches", async (c) => {
   const hours = Math.min(Number(c.req.query("hours")) || 24, 168);
   return c.json(await recentObjectMatches(db, hours));
+});
+app.post("/match-profiles", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body.profile !== "object" || body.profile === null) {
+    return c.json({ error: "profile required" }, 400);
+  }
+  const id = await createMatchProfile(db, {
+    leadId: typeof body.leadId === "number" ? body.leadId : void 0,
+    contactId: typeof body.contactId === "number" ? body.contactId : void 0,
+    profile: body.profile,
+    lang: typeof body.lang === "string" ? body.lang : void 0
+  });
+  return c.json({ id }, 201);
+});
+app.get("/match-profiles/alerts", async (c) => {
+  const hours = Math.min(Number(c.req.query("hours")) || 24, 168);
+  return c.json(await newMatchesForProfiles(db, hours));
+});
+app.get("/match-profiles/:id", async (c) => {
+  const row = await getMatchProfile(db, Number(c.req.param("id")));
+  if (!row) return c.json({ error: "not found" }, 404);
+  return c.json(row);
+});
+app.patch("/match-profiles/:id", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  if (body?.active === false) await deactivateMatchProfile(db, Number(c.req.param("id")));
+  return c.json({ ok: true });
 });
 app.get("/objects/:rw", async (c) => {
   const rw = c.req.param("rw");

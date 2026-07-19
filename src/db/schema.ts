@@ -564,6 +564,30 @@ export const leadEvents = pgTable(
 export type LeadRow = typeof leads.$inferSelect;
 export type LeadInsert = typeof leads.$inferInsert;
 
+/**
+ * RW Match — сохранённый профиль подбора («уведомлять о новых совпадениях»).
+ * `profile` — jsonb BuyerProfile (web/src/types/match.ts). Клиентский доступ на
+ * сайте — по HMAC-токену от id (не колонка), как shortlist-token. Утренний
+ * дайджест владельцу тянет GET /match-profiles/alerts; страница «Мои совпадения»
+ * на сайте считает выдачу тем же web-движком из этого profile.
+ */
+export const matchProfiles = pgTable(
+  "match_profiles",
+  {
+    id: serial("id").primaryKey(),
+    leadId: integer("lead_id").references(() => leads.id, { onDelete: "set null" }),
+    contactId: integer("contact_id").references(() => contacts.id, { onDelete: "set null" }),
+    profile: jsonb("profile").$type<Record<string, unknown>>().notNull(),
+    lang: text("lang"), // en | ru
+    active: boolean("active").notNull().default(true),
+    lastMatchedAt: timestamp("last_matched_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ activeIdx: index("match_profiles_active_idx").on(t.active) }),
+);
+
+export type MatchProfileRow = typeof matchProfiles.$inferSelect;
+
 // ============================================================
 // Contact bot (public @rightwayphangan_bot) — webhook on this API.
 // ============================================================
