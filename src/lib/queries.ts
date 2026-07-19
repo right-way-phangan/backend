@@ -138,11 +138,26 @@ async function assembleAll(db: AnyPgDatabase): Promise<RealEstateObject[]> {
  * for web sanitize.
  */
 function stripSellerPii(o: RealEstateObject): RealEstateObject {
-  const { contacts, ownerName, docs, needsReview, ...pub } = o;
+  const {
+    contacts, ownerName, docs, needsReview,
+    driveFolder, ddLawyer, ddChecklist,
+    outreachStatus, outreachNote, outreachDate, outreachAttempts,
+    reasonForSelling, timeOnMarketMonths,
+    ...pub
+  } = o;
   void contacts;
   void ownerName;
   void docs;
   void needsReview;
+  void driveFolder; // приватная ссылка на Drive-папку объекта
+  void ddLawyer; // имя юриста DD — внутреннее; публично только ddStatus/ddDate
+  void ddChecklist;
+  void outreachStatus; // обзвон собственников — целиком внутреннее
+  void outreachNote; // сюда переносят комиссию/PII из descriptionRaw — не наружу
+  void outreachDate;
+  void outreachAttempts;
+  void reasonForSelling; // мотивация продавца — внутренний переговорный сигнал
+  void timeOnMarketMonths; // время на рынке — внутренний сигнал переоценки
   return pub;
 }
 
