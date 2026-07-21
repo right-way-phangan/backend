@@ -38,10 +38,12 @@ __export(schema_exports, {
   objectViewVisitors: () => objectViewVisitors,
   objectViewsDaily: () => objectViewsDaily,
   objects: () => objects,
+  partners: () => partners,
   pipelines: () => pipelines,
   processedUpdates: () => processedUpdates,
   projectUnits: () => projectUnits,
   rateLimits: () => rateLimits,
+  referrals: () => referrals,
   referralsDaily: () => referralsDaily,
   searchEvents: () => searchEvents,
   socialPosts: () => socialPosts,
@@ -672,6 +674,67 @@ var rateLimits = pgTable(
   },
   (t) => ({
     pk: primaryKey({ columns: [t.key, t.windowStart] })
+  })
+);
+var partners = pgTable(
+  "partners",
+  {
+    id: serial("id").primaryKey(),
+    slug: text("slug").notNull().unique(),
+    name: text("name").notNull(),
+    contactName: text("contact_name"),
+    messenger: text("messenger"),
+    // канал: tg/line/wa + хэндл
+    linkedRw: text("linked_rw").array(),
+    // RW-номера проектов/объектов партнёра
+    termsStatus: text("terms_status").notNull().default("draft"),
+    // draft | sent | accepted | declined — статус term-sheet
+    termsSentAt: timestamp("terms_sent_at", { withTimezone: true }),
+    termsAcceptedAt: timestamp("terms_accepted_at", { withTimezone: true }),
+    termsArtifact: text("terms_artifact"),
+    // ГДЕ лежит акцепт (скрин/ссылка на переписку) — НЕ цифры и проценты
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({
+    termsStatusIdx: index("partners_terms_status_idx").on(t.termsStatus)
+  })
+);
+var referrals = pgTable(
+  "referrals",
+  {
+    id: serial("id").primaryKey(),
+    leadId: integer("lead_id").notNull().references(() => leads.id),
+    partnerId: integer("partner_id").notNull().references(() => partners.id),
+    objectRw: text("object_rw"),
+    // проект/объект передачи
+    status: text("status").notNull().default("teaser_sent"),
+    // teaser_sent | confirmed | handed | viewing | negotiation | closed | lost
+    teaserText: text("teaser_text"),
+    // что отправили (бюджет/сроки/что ищет — БЕЗ имени клиента)
+    teaserSentAt: timestamp("teaser_sent_at", { withTimezone: true }).defaultNow(),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+    // ack партнёра
+    ackArtifact: text("ack_artifact"),
+    // текст/скрин ack — ОБЯЗАТЕЛЕН для перехода в handed
+    handedAt: timestamp("handed_at", { withTimezone: true }),
+    feeMilestone: text("fee_milestone"),
+    // СЛОВАМИ, без цифр: "per partnership terms, due at contract signing"
+    protectionUntil: timestamp("protection_until", { withTimezone: true }),
+    // атрибуция: авто handed_at + 12 мес при переходе в handed
+    nextFollowUp: timestamp("next_follow_up", { withTimezone: true }),
+    lastClientTouch: timestamp("last_client_touch", { withTimezone: true }),
+    verifiedBy: text("verified_by"),
+    // client | partner | inventory-signal — как узнали статус
+    lostReason: text("lost_reason"),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({
+    statusIdx: index("referrals_status_idx").on(t.status),
+    partnerIdx: index("referrals_partner_idx").on(t.partnerId)
   })
 );
 
@@ -3560,8 +3623,172 @@ async function listValuations(db2, limit = 20) {
   return db2.select().from(valuations).orderBy(desc7(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
 }
 
+// src/lib/referrals.ts
+import { eq as eq14, desc as desc8, sql as sql7 } from "drizzle-orm";
+var ReferralInputError = class extends Error {
+};
+var TERMS_STATUSES = ["draft", "sent", "accepted", "declined"];
+var REFERRAL_STATUSES = [
+  "teaser_sent",
+  "confirmed",
+  "handed",
+  "viewing",
+  "negotiation",
+  "closed",
+  "lost"
+];
+function slugify2(input) {
+  return input.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+}
+function toDate(v, field) {
+  if (v == null || v === "") return null;
+  const d = v instanceof Date ? v : new Date(String(v));
+  if (isNaN(d.getTime())) throw new ReferralInputError(`${field}: invalid date`);
+  return d;
+}
+async function createPartner(db2, input) {
+  const name = String(input.name ?? "").trim();
+  if (!name) throw new ReferralInputError("name is required");
+  let slug = slugify2(input.slug?.trim() || name) || `partner-${Date.now()}`;
+  const existing = await db2.select({ slug: partners.slug }).from(partners).where(sql7`(${partners.slug} = ${slug} OR ${partners.slug} LIKE ${slug + "-%"})`);
+  if (existing.some((r) => r.slug === slug)) {
+    let n = 2;
+    const taken = new Set(existing.map((r) => r.slug));
+    while (taken.has(`${slug}-${n}`)) n++;
+    slug = `${slug}-${n}`;
+  }
+  const [row] = await db2.insert(partners).values({
+    slug,
+    name,
+    contactName: input.contactName?.trim() || null,
+    messenger: input.messenger?.trim() || null,
+    linkedRw: input.linkedRw?.length ? input.linkedRw : null,
+    notes: input.notes?.trim() || null
+  }).returning();
+  return row;
+}
+async function updatePartner(db2, id, patch) {
+  const set = { updatedAt: /* @__PURE__ */ new Date() };
+  if (patch.name !== void 0) {
+    const name = String(patch.name).trim();
+    if (!name) throw new ReferralInputError("name cannot be empty");
+    set.name = name;
+  }
+  if (patch.termsStatus !== void 0) {
+    if (!TERMS_STATUSES.includes(patch.termsStatus)) {
+      throw new ReferralInputError(`termsStatus must be one of: ${TERMS_STATUSES.join(", ")}`);
+    }
+    set.termsStatus = patch.termsStatus;
+  }
+  if (patch.termsSentAt !== void 0) set.termsSentAt = toDate(patch.termsSentAt, "termsSentAt");
+  if (patch.termsAcceptedAt !== void 0)
+    set.termsAcceptedAt = toDate(patch.termsAcceptedAt, "termsAcceptedAt");
+  if (patch.termsArtifact !== void 0) set.termsArtifact = patch.termsArtifact;
+  if (patch.contactName !== void 0) set.contactName = patch.contactName;
+  if (patch.messenger !== void 0) set.messenger = patch.messenger;
+  if (patch.linkedRw !== void 0) set.linkedRw = patch.linkedRw;
+  if (patch.notes !== void 0) set.notes = patch.notes;
+  const [row] = await db2.update(partners).set(set).where(eq14(partners.id, id)).returning();
+  return row ?? null;
+}
+async function listPartners(db2) {
+  return db2.select().from(partners).orderBy(partners.name);
+}
+async function createReferral(db2, input) {
+  const leadId = Number(input.leadId);
+  const partnerId = Number(input.partnerId);
+  const teaserText = String(input.teaserText ?? "").trim();
+  if (!Number.isInteger(leadId) || leadId <= 0) throw new ReferralInputError("leadId is required");
+  if (!Number.isInteger(partnerId) || partnerId <= 0)
+    throw new ReferralInputError("partnerId is required");
+  if (!teaserText) throw new ReferralInputError("teaserText is required \u2014 qualification gate");
+  const [lead] = await db2.select({ id: leads.id }).from(leads).where(eq14(leads.id, leadId)).limit(1);
+  if (!lead) throw new ReferralInputError(`lead ${leadId} not found`);
+  const [partner] = await db2.select({ id: partners.id }).from(partners).where(eq14(partners.id, partnerId)).limit(1);
+  if (!partner) throw new ReferralInputError(`partner ${partnerId} not found`);
+  const [row] = await db2.insert(referrals).values({
+    leadId,
+    partnerId,
+    objectRw: input.objectRw?.trim() || null,
+    teaserText,
+    feeMilestone: input.feeMilestone?.trim() || null,
+    notes: input.notes?.trim() || null
+  }).returning();
+  return row;
+}
+async function updateReferral(db2, id, patch) {
+  const [current] = await db2.select().from(referrals).where(eq14(referrals.id, id)).limit(1);
+  if (!current) return null;
+  const set = { updatedAt: /* @__PURE__ */ new Date() };
+  if (patch.status !== void 0) {
+    if (!REFERRAL_STATUSES.includes(patch.status)) {
+      throw new ReferralInputError(`status must be one of: ${REFERRAL_STATUSES.join(", ")}`);
+    }
+    set.status = patch.status;
+  }
+  if (patch.confirmedAt !== void 0) set.confirmedAt = toDate(patch.confirmedAt, "confirmedAt");
+  if (patch.ackArtifact !== void 0) set.ackArtifact = patch.ackArtifact;
+  if (patch.objectRw !== void 0) set.objectRw = patch.objectRw;
+  if (patch.teaserText !== void 0) {
+    const t = String(patch.teaserText).trim();
+    if (!t) throw new ReferralInputError("teaserText cannot be empty");
+    set.teaserText = t;
+  }
+  if (patch.feeMilestone !== void 0) set.feeMilestone = patch.feeMilestone;
+  if (patch.nextFollowUp !== void 0) set.nextFollowUp = toDate(patch.nextFollowUp, "nextFollowUp");
+  if (patch.lastClientTouch !== void 0)
+    set.lastClientTouch = toDate(patch.lastClientTouch, "lastClientTouch");
+  if (patch.verifiedBy !== void 0) set.verifiedBy = patch.verifiedBy;
+  if (patch.lostReason !== void 0) set.lostReason = patch.lostReason;
+  if (patch.notes !== void 0) set.notes = patch.notes;
+  if (patch.status === "handed") {
+    const confirmedAt = patch.confirmedAt !== void 0 ? set.confirmedAt : current.confirmedAt;
+    const ackArtifact = patch.ackArtifact !== void 0 ? patch.ackArtifact : current.ackArtifact;
+    if (!confirmedAt || !ackArtifact?.trim()) {
+      throw new ReferralInputError(
+        "handed requires non-empty confirmedAt and ackArtifact (partner acknowledgement)"
+      );
+    }
+    if (current.status !== "handed") {
+      const handedAt = /* @__PURE__ */ new Date();
+      const protectionUntil = new Date(handedAt);
+      protectionUntil.setMonth(protectionUntil.getMonth() + 12);
+      set.handedAt = handedAt;
+      set.protectionUntil = protectionUntil;
+    }
+  }
+  const [row] = await db2.update(referrals).set(set).where(eq14(referrals.id, id)).returning();
+  return row ?? null;
+}
+async function listReferrals(db2) {
+  return db2.select({
+    id: referrals.id,
+    leadId: referrals.leadId,
+    partnerId: referrals.partnerId,
+    objectRw: referrals.objectRw,
+    status: referrals.status,
+    teaserText: referrals.teaserText,
+    teaserSentAt: referrals.teaserSentAt,
+    confirmedAt: referrals.confirmedAt,
+    ackArtifact: referrals.ackArtifact,
+    handedAt: referrals.handedAt,
+    feeMilestone: referrals.feeMilestone,
+    protectionUntil: referrals.protectionUntil,
+    nextFollowUp: referrals.nextFollowUp,
+    lastClientTouch: referrals.lastClientTouch,
+    verifiedBy: referrals.verifiedBy,
+    lostReason: referrals.lostReason,
+    notes: referrals.notes,
+    createdAt: referrals.createdAt,
+    updatedAt: referrals.updatedAt,
+    partnerName: partners.name,
+    partnerSlug: partners.slug,
+    leadName: leads.name
+  }).from(referrals).leftJoin(partners, eq14(referrals.partnerId, partners.id)).leftJoin(leads, eq14(referrals.leadId, leads.id)).orderBy(desc8(referrals.createdAt));
+}
+
 // src/lib/ratelimit.ts
-import { sql as sql7 } from "drizzle-orm";
+import { sql as sql8 } from "drizzle-orm";
 import { lt } from "drizzle-orm";
 async function checkRateLimit(db2, key, limit, windowSec) {
   const now = Date.now();
@@ -3569,7 +3796,7 @@ async function checkRateLimit(db2, key, limit, windowSec) {
   const windowStart = new Date(Math.floor(now / windowMs) * windowMs);
   const [row] = await db2.insert(rateLimits).values({ key, windowStart, count: 1 }).onConflictDoUpdate({
     target: [rateLimits.key, rateLimits.windowStart],
-    set: { count: sql7`${rateLimits.count} + 1` }
+    set: { count: sql8`${rateLimits.count} + 1` }
   }).returning({ count: rateLimits.count });
   const count = row?.count ?? 1;
   if (Math.random() < 0.01) {
@@ -4191,6 +4418,52 @@ app.post("/valuations", async (c) => {
     if (err instanceof ValuationInputError) return c.json({ error: err.message }, 400);
     console.error("[POST /valuations]", err);
     return c.json({ error: "log failed" }, 500);
+  }
+});
+app.get("/partners", async (c) => c.json(await listPartners(db)));
+app.post("/partners", async (c) => {
+  try {
+    const res = await createPartner(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof ReferralInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /partners]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+app.patch("/partners/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const res = await updatePartner(db, id, await c.req.json());
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    if (err instanceof ReferralInputError) return c.json({ error: err.message }, 400);
+    console.error("[PATCH /partners]", err);
+    return c.json({ error: "update failed" }, 500);
+  }
+});
+app.get("/referrals", async (c) => c.json(await listReferrals(db)));
+app.post("/referrals", async (c) => {
+  try {
+    const res = await createReferral(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof ReferralInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /referrals]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+app.patch("/referrals/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const res = await updateReferral(db, id, await c.req.json());
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    if (err instanceof ReferralInputError) return c.json({ error: err.message }, 400);
+    console.error("[PATCH /referrals]", err);
+    return c.json({ error: "update failed" }, 500);
   }
 });
 
