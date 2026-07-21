@@ -53,6 +53,10 @@ import {
   listFactorOverrides, setFactorOverrides, listComps, addComp, updateComp, deleteComp,
   logValuation, listValuations, ValuationInputError,
 } from "../lib/valuation";
+import {
+  createPartner, updatePartner, listPartners,
+  createReferral, updateReferral, listReferrals, ReferralInputError,
+} from "../lib/referrals";
 import { checkRateLimit } from "../lib/ratelimit";
 
 const API_TOKEN = process.env.API_TOKEN;
@@ -893,5 +897,66 @@ app.post("/valuations", async (c) => {
     if (err instanceof ValuationInputError) return c.json({ error: err.message }, 400);
     console.error("[POST /valuations]", err);
     return c.json({ error: "log failed" }, 500);
+  }
+});
+
+// ─── Партнёрский пивот: partners (developer-fee) + передачи лидов ───
+// Денежных полей нет by design — статусы и артефакты, цифры вне продукта.
+// Не путать с GET /referrals/summary выше (веб-аналитика источников трафика).
+
+/** Партнёры-плательщики developer-fee — /admin/referrals. */
+app.get("/partners", async (c) => c.json(await listPartners(db)));
+
+app.post("/partners", async (c) => {
+  try {
+    const res = await createPartner(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof ReferralInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /partners]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+
+/** Term-sheet статус/даты/артефакт + контактные поля. */
+app.patch("/partners/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const res = await updatePartner(db, id, await c.req.json());
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    if (err instanceof ReferralInputError) return c.json({ error: err.message }, 400);
+    console.error("[PATCH /partners]", err);
+    return c.json({ error: "update failed" }, 500);
+  }
+});
+
+/** Передачи лидов с джойном партнёр (name/slug) + лид (name). */
+app.get("/referrals", async (c) => c.json(await listReferrals(db)));
+
+/** Новая передача. Гейт квалификации v1: лид + партнёр существуют, тизер непуст. */
+app.post("/referrals", async (c) => {
+  try {
+    const res = await createReferral(db, await c.req.json());
+    return c.json(res, 201);
+  } catch (err) {
+    if (err instanceof ReferralInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /referrals]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+
+/** Смена статуса/полей. Гейт handed (confirmed_at + ack_artifact) — в lib/referrals. */
+app.patch("/referrals/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const res = await updateReferral(db, id, await c.req.json());
+    return res ? c.json(res) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    if (err instanceof ReferralInputError) return c.json({ error: err.message }, 400);
+    console.error("[PATCH /referrals]", err);
+    return c.json({ error: "update failed" }, 500);
   }
 });
