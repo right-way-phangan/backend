@@ -323,6 +323,30 @@ export function sanitizePolygon(
   return pts.length >= 3 ? pts : undefined;
 }
 
+/** Ход стройки: массив фотоотчётов. Записи без фото и не-http ссылки отбрасываем. */
+export function sanitizeConstructionUpdates(
+  raw: unknown,
+): Array<{ date: string; dateRu?: string; note?: string; noteRu?: string; photos: string[] }> | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const out = raw.flatMap((u) => {
+    if (!u || typeof u !== "object") return [];
+    const r = u as Record<string, unknown>;
+    const photos = (Array.isArray(r.photos) ? r.photos : [])
+      .map(str)
+      .filter((p) => /^https?:\/\//i.test(p));
+    if (photos.length === 0) return [];
+    return [{
+      date: str(r.date),
+      dateRu: str(r.dateRu) || undefined,
+      note: str(r.note) || undefined,
+      noteRu: str(r.noteRu) || undefined,
+      photos,
+    }];
+  });
+  return out.length ? out : undefined;
+}
+
 // ---- feature code → boolean column ----
 const FEATURE_COL: Record<string, keyof ObjectInsert> = {
   SEA_VIEW: "seaView",
@@ -594,6 +618,8 @@ const PATCHABLE = new Set<keyof ObjectInsert>([
   "coordsApprox",
   // off-plan лендинг (/projects) — сырой многострочный формат как в createObject
   "floorplanUrls", "videoUrls", "priceStages", "timeline", "team",
+  // ход стройки (/projects/[slug]/construction) — массив записей с фото, не строка
+  "constructionUpdates",
 ]);
 
 /** parsePairs key names per off-plan jsonb column (same as createObject). */
@@ -625,6 +651,11 @@ export async function updateObject(
     if (k === "priceStages" || k === "timeline" || k === "team") {
       const [pk, pv] = PAIR_KEYS[k];
       set[k] = typeof v === "string" ? parsePairs(v, pk, pv) ?? null : null;
+      continue;
+    }
+    // Ход стройки редактируется структурно (дата + подписи + фото), не текстом.
+    if (k === "constructionUpdates") {
+      set[k] = sanitizeConstructionUpdates(v) ?? null;
       continue;
     }
     set[k] = v;
