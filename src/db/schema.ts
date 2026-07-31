@@ -118,6 +118,12 @@ export const objects = pgTable(
     priceStages: jsonb("price_stages").$type<Array<{ label: string; value: string }>>(),
     timeline: jsonb("timeline").$type<Array<{ date: string; event: string }>>(),
     team: jsonb("team").$type<Array<{ role: string; name: string }>>(),
+    // Ход стройки — фотоотчёты по датам для страницы /projects/[slug]/construction.
+    // Публичное: фото со стройплощадки, подпись EN+RU. Порядок = порядок в массиве
+    // (новые записи сверху задаёт редактор, не БД).
+    constructionUpdates: jsonb("construction_updates").$type<
+      Array<{ date: string; dateRu?: string; note?: string; noteRu?: string; photos: string[] }>
+    >(),
 
     // Operational
     ownerName: text("owner_name"),

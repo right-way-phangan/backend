@@ -8,6 +8,13 @@ import type { ObjectRow } from "../db/schema";
 type Pair = { label: string; value: string };
 type TimelineRow = { date: string; event: string };
 type TeamRow = { role: string; name: string };
+type ConstructionUpdate = {
+  date: string;
+  dateRu?: string;
+  note?: string;
+  noteRu?: string;
+  photos: string[];
+};
 
 /** Seller-side contact for an object (owner/broker/caretaker/lawyer). NON-public. */
 export interface ObjectContact {
@@ -82,6 +89,7 @@ export interface RealEstateObject {
   priceStages?: Pair[];
   timeline?: TimelineRow[];
   team?: TeamRow[];
+  constructionUpdates?: ConstructionUpdate[];
   ownerName?: string;
   contacts?: ObjectContact[];
   buildingRules?: string;
@@ -199,6 +207,7 @@ export function toDomain(
     priceStages: u(row.priceStages) ?? undefined,
     timeline: u(row.timeline) ?? undefined,
     team: u(row.team) ?? undefined,
+    constructionUpdates: u(row.constructionUpdates) ?? undefined,
     ownerName: u(row.ownerName),
     contacts: contacts.length ? contacts : undefined,
     buildingRules: u(row.buildingRules),

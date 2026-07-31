@@ -145,6 +145,10 @@ var objects = pgTable(
     priceStages: jsonb("price_stages").$type(),
     timeline: jsonb("timeline").$type(),
     team: jsonb("team").$type(),
+    // Ход стройки — фотоотчёты по датам для страницы /projects/[slug]/construction.
+    // Публичное: фото со стройплощадки, подпись EN+RU. Порядок = порядок в массиве
+    // (новые записи сверху задаёт редактор, не БД).
+    constructionUpdates: jsonb("construction_updates").$type(),
     // Operational
     ownerName: text("owner_name"),
     buildingRules: text("building_rules"),
@@ -782,6 +786,7 @@ function toDomain(row, photos, docs, contacts2 = []) {
     priceStages: u(row.priceStages) ?? void 0,
     timeline: u(row.timeline) ?? void 0,
     team: u(row.team) ?? void 0,
+    constructionUpdates: u(row.constructionUpdates) ?? void 0,
     ownerName: u(row.ownerName),
     contacts: contacts2.length ? contacts2 : void 0,
     buildingRules: u(row.buildingRules),
@@ -2200,6 +2205,24 @@ function sanitizePolygon(raw) {
   }
   return pts.length >= 3 ? pts : void 0;
 }
+function sanitizeConstructionUpdates(raw) {
+  if (!Array.isArray(raw)) return void 0;
+  const str = (v) => typeof v === "string" ? v.trim() : "";
+  const out = raw.flatMap((u2) => {
+    if (!u2 || typeof u2 !== "object") return [];
+    const r = u2;
+    const photos = (Array.isArray(r.photos) ? r.photos : []).map(str).filter((p) => /^https?:\/\//i.test(p));
+    if (photos.length === 0) return [];
+    return [{
+      date: str(r.date),
+      dateRu: str(r.dateRu) || void 0,
+      note: str(r.note) || void 0,
+      noteRu: str(r.noteRu) || void 0,
+      photos
+    }];
+  });
+  return out.length ? out : void 0;
+}
 var FEATURE_COL = {
   SEA_VIEW: "seaView",
   MOUNTAIN_VIEW: "mountainView",
@@ -2433,7 +2456,9 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "videoUrls",
   "priceStages",
   "timeline",
-  "team"
+  "team",
+  // ход стройки (/projects/[slug]/construction) — массив записей с фото, не строка
+  "constructionUpdates"
 ]);
 var PAIR_KEYS = {
   priceStages: ["label", "value"],
@@ -2455,6 +2480,10 @@ async function updateObject(db2, rwNumber, patch) {
     if (k === "priceStages" || k === "timeline" || k === "team") {
       const [pk, pv] = PAIR_KEYS[k];
       set[k] = typeof v === "string" ? parsePairs(v, pk, pv) ?? null : null;
+      continue;
+    }
+    if (k === "constructionUpdates") {
+      set[k] = sanitizeConstructionUpdates(v) ?? null;
       continue;
     }
     set[k] = v;
