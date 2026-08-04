@@ -105,13 +105,13 @@ const DESC_EN =
   "Verana Villas is the third phase of an established eco-resort on the quiet west coast of Koh Phangan — a short walk from an international school and the beach, five minutes by car from the island's main pier at Thong Sala. The first two phases are complete and their villas already operate as highly rated holiday rentals; Verana repeats the same architecture and finish, now offered off-plan.\n\n" +
   "Each two-bedroom villa is a single-storey home of 133 m² with two bedrooms, three bathrooms, an island kitchen and a bright living room under a vaulted timber ceiling. Floor-to-ceiling glass opens onto a private 24 m² pool, a 26 m² terrace and a landscaped tropical garden on a ~600 m² plot. Villas are delivered fully turnkey — furniture, appliances, air-conditioning, finishing, landscaping and the pool are all included.\n\n" +
   "The land is held on a 30-year lease with renewal. The current phase is under construction, with the first six villas handing over in November 2026; a resident café, traditional baths and a spa are planned for the shared area. A managed short-stay rental programme is available for owners who want the villa to work while they are away.\n\n" +
-  "One- and three-bedroom formats are available on request. Photographs show completed villas of the same design at the resort. Right Way handles viewings, due diligence and the full transaction.";
+  "One- and three-bedroom formats are available on request. Photographs show completed villas of the same design at the resort. Right Way arranges the viewing.";
 
 const DESC_RU =
   "Verana Villas — третья фаза действующего эко-резорта на тихом западном побережье Ко Пангана: пешком до международной школы и пляжа, пять минут на машине до главного пирса острова в Тонг Сала. Первые две фазы уже построены, и их виллы работают как высоко оценённая аренда; Verana повторяет ту же архитектуру и отделку, теперь на стадии off-plan.\n\n" +
   "Каждая вилла с двумя спальнями — одноэтажный дом 133 м²: две спальни, три санузла, кухня-остров и светлая гостиная под высоким деревянным потолком. Панорамное остекление в пол выходит к приватному бассейну 24 м², террасе 26 м² и тропическому саду на участке ~600 м². Виллы сдаются полностью под ключ — мебель, техника, кондиционеры, чистовая отделка, ландшафт и бассейн уже включены.\n\n" +
   "Земля — в аренде на 30 лет с пролонгацией. Текущая фаза строится, первые шесть вилл сдаются в ноябре 2026; в общественной зоне запланированы кафе для резидентов, бани и СПА. Для владельцев доступна программа управления краткосрочной арендой.\n\n" +
-  "Форматы с одной и тремя спальнями — по запросу. На фотографиях — построенные виллы того же дизайна в резорте. Right Way берёт на себя показы, проверку и полное сопровождение сделки.";
+  "Форматы с одной и тремя спальнями — по запросу. На фотографиях — построенные виллы того же дизайна в резорте. Показ объекта организует Right Way.";
 
 const AREA_NOTE =
   "Built-up 133 m² · 2 bedrooms / 3 bathrooms · island kitchen · private pool 24 m² · terrace 26 m² · landscaped plot ~600 m² · 30-year land lease";
