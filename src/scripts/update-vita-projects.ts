@@ -95,7 +95,7 @@ const TROPICAL_EN =
   "The land is Chanote title leased for 30 years — about 29 years remain at handover. A foreign buyer purchases as a private individual: a long-term lease on the villa plus a sublease of the plot. The building permit is pending.\n\n" +
   "Price THB 4,500,000. Reservation deposit THB 50,000, first payment 30%, the balance in tranches up to handover. At registration with the Land Department the buyer pays the 1.1% building-and-land tax; payment in USDT carries no cash-out fee. Warranty — 5 years on the structure, 2 years on finishes and engineering systems.\n\n" +
   "Construction runs from April 2026 to March 2027. Seven of the eight villas are available — villa 5 is sold. The team's previous project on Koh Phangan is the Usiku complex.\n\n" +
-  "The images are project visualisations. Right Way arranges the viewing.";
+  "The images are project visualisations. Right Way arranges the viewing. The developer handles the sale and your own lawyer checks the documents.";
 
 const TROPICAL_RU =
   "Tropical Villas — бутик-комплекс из восьми вилл с одной спальней в Шритану, в пяти минутах езды до моря и в самом обжитом районе острова: кафе, йога-студии и магазины в пешей доступности.\n\n" +
@@ -103,7 +103,7 @@ const TROPICAL_RU =
   "Земля с чанотом, в аренде на 30 лет — к передаче объекта остаётся около 29 лет. Иностранец покупает как физическое лицо: долгосрочная аренда виллы плюс субаренда участка. Разрешение на строительство ожидается.\n\n" +
   "Цена — 4 500 000 THB. Резервационный депозит 50 000 THB, первый платёж 30%, остаток — траншами до передачи. При регистрации в Земельном департаменте покупатель платит налог на строение и землю 1,1%; при оплате в USDT комиссия за обналичивание не взимается. Гарантия — 5 лет на здание, 2 года на отделку и инженерные системы.\n\n" +
   "Строительство идёт с апреля 2026 по март 2027. Свободны семь вилл из восьми — вилла №5 продана. Прошлый проект команды на Пангане — комплекс Usiku.\n\n" +
-  "На изображениях — визуализации проекта. Показ объекта организует Right Way.";
+  "На изображениях — визуализации проекта. Показ объекта организует Right Way. Сделку ведёт застройщик, документы проверяет ваш юрист.";
 
 const SKYLINE_EN =
   "Skyline Villas is a gated cluster of sea-view pool villas an eight-minute walk from Mae Haad beach, on the grounds of Venera Village in the north-west of Koh Phangan — the Moon and PRAYA restaurants, a large pool and a children's playground are already open on site.\n\n" +
@@ -112,7 +112,7 @@ const SKYLINE_EN =
   "Price from THB 11,500,000 at launch and THB 12,300,000 once the foundations are complete; payment is staged over about 18 months — a 20% deposit plus tranches tied to construction milestones.\n\n" +
   "The project totals 14 villas. Phase 1 is sold out; phase 2 brings five more pool villas of the same type and two 90 m² villas without a pool. A fourth phase adds 24 apartments of about 50 m², with construction starting at the end of September 2026. Handover of the villas — August 2027.\n\n" +
   "The team's previous project in Venera Village is the PRAYA restaurant.\n\n" +
-  "The images are project visualisations. Right Way arranges the viewing.";
+  "The images are project visualisations. Right Way arranges the viewing. The developer handles the sale and your own lawyer checks the documents.";
 
 const SKYLINE_RU =
   "Skyline Villas — закрытый посёлок вилл с бассейном и видом на море в восьми минутах ходьбы от пляжа Mae Haad, на территории Venera Village на северо-западе Ко Пангана: рестораны Moon и PRAYA, большой бассейн и детская площадка здесь уже работают.\n\n" +
@@ -121,7 +121,7 @@ const SKYLINE_RU =
   "Цена — от 11 500 000 THB на старте и 12 300 000 THB после готовности фундамента; оплата поэтапная примерно на 18 месяцев: депозит 20% плюс транши по вехам стройки.\n\n" +
   "Всего в проекте 14 вилл. Первая очередь распродана; вторая — ещё пять вилл с бассейном того же типа и две виллы 90 м² без бассейна. Четвёртой очередью добавятся 24 апартамента примерно по 50 м², начало строительства — конец сентября 2026. Передача вилл — август 2027.\n\n" +
   "Прошлый проект команды в Venera Village — ресторан PRAYA.\n\n" +
-  "На изображениях — визуализации проекта. Показ объекта организует Right Way.";
+  "На изображениях — визуализации проекта. Показ объекта организует Right Way. Сделку ведёт застройщик, документы проверяет ваш юрист.";
 
 async function main() {
   console.log("== RW-P0020 Tropical Villas ==");
