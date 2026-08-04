@@ -18,6 +18,12 @@ import { cors } from "hono/cors";
 import { createDb } from "../db/connect";
 import { getPublicObjects, getAllObjects, scanPhotosForDocuments, purgePhotosByUrl } from "../lib/queries";
 import { recentObjectMatches } from "../lib/matching";
+import {
+  createMatchProfile,
+  getMatchProfile,
+  deactivateMatchProfile,
+  newMatchesForProfiles,
+} from "../lib/match-profiles";
 import { toPublishable, formatPost, type PublishChannel, type PublishLang } from "../lib/publishable";
 import {
   createObject, updateObject, deleteObject, addObjectPhotos, replaceObjectContacts, ObjectInputError,
@@ -177,6 +183,43 @@ app.get("/objects/all", async (c) => {
 app.get("/objects/recent-matches", async (c) => {
   const hours = Math.min(Number(c.req.query("hours")) || 24, 168);
   return c.json(await recentObjectMatches(db, hours));
+});
+
+// ---- RW Match — сохранённые профили подбора + алерты ----
+
+/** Сохранить профиль подбора («уведомлять о новых совпадениях»). */
+app.post("/match-profiles", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body.profile !== "object" || body.profile === null) {
+    return c.json({ error: "profile required" }, 400);
+  }
+  const id = await createMatchProfile(db, {
+    leadId: typeof body.leadId === "number" ? body.leadId : undefined,
+    contactId: typeof body.contactId === "number" ? body.contactId : undefined,
+    profile: body.profile as Record<string, unknown>,
+    lang: typeof body.lang === "string" ? body.lang : undefined,
+  });
+  return c.json({ id }, 201);
+});
+
+/** Новые совпадения по активным профилям за N часов — для утреннего дайджеста. */
+app.get("/match-profiles/alerts", async (c) => {
+  const hours = Math.min(Number(c.req.query("hours")) || 24, 168);
+  return c.json(await newMatchesForProfiles(db, hours));
+});
+
+/** Профиль по id — сайт («Мои совпадения») считает выдачу тем же web-движком. */
+app.get("/match-profiles/:id", async (c) => {
+  const row = await getMatchProfile(db, Number(c.req.param("id")));
+  if (!row) return c.json({ error: "not found" }, 404);
+  return c.json(row);
+});
+
+/** Отписаться (деактивировать профиль). */
+app.patch("/match-profiles/:id", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  if (body?.active === false) await deactivateMatchProfile(db, Number(c.req.param("id")));
+  return c.json({ ok: true });
 });
 
 app.get("/objects/:rw", async (c) => {
