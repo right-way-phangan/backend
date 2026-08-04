@@ -98,14 +98,14 @@ const DESC_EN =
   "Each villa is a one-bedroom house of 101 m² on its own 230 m² plot: 52 m² inside, a 28 m² terrace and a private 10 m² pool looking out over the trees to the sea. Sliding glass runs the full width of the living room, the kitchen and bathroom are laid in glazed green tile, ceilings are slatted timber and floors are terracotta. Air conditioning, internet, fencing and private parking are part of the build; the villa is delivered furnished.\n\n" +
   "The land is held on a 30-year lease. The first three years of ground rent are already included in the price — the schedule for the remaining years is fixed in the contract and listed under Payment.\n\n" +
   "The site is under construction: as of July 2026 the plot is cleared, the foundations are poured and the columns are up. Progress is documented with dated photo updates on the construction page. Four villas in total, all available.\n\n" +
-  "Images are architectural visualisations of the project. Right Way handles viewings, document checks and the full transaction.";
+  "Images are architectural visualisations of the project. Right Way arranges the viewing.";
 
 const DESC_RU =
   "Hush — проект из четырёх вилл в Бан Тай на южном побережье Ко Пангана: десять минут до пирса в Тонг Сала, больниц и супермаркетов, а сразу за участками начинаются джунгли и горы.\n\n" +
   "Каждая вилла — одноэтажный дом с одной спальней, 101 м² на собственном участке 230 м²: 52 м² внутри, терраса 28 м² и приватный бассейн 10 м² с видом поверх крон на море. Гостиная раздвигается панорамным остеклением во всю ширину, кухня и санузел выложены глазурованной зелёной плиткой, потолки — рейка, полы — терракота. Кондиционеры, интернет, забор и парковка входят в стройку; вилла сдаётся с мебелью.\n\n" +
   "Земля — в аренде на 30 лет. Первые три года аренды уже включены в цену, график на оставшийся срок зафиксирован в договоре и приведён в разделе оплаты.\n\n" +
   "Стройка идёт: на июль 2026 участок расчищен, фундамент залит, колонны подняты. Ход работ показываем фотоотчётами по датам на отдельной странице. Всего четыре виллы, свободны все.\n\n" +
-  "На изображениях — визуализации проекта. Right Way берёт на себя показы, проверку документов и сопровождение сделки.";
+  "На изображениях — визуализации проекта. Показ объекта организует Right Way.";
 
 const AREA_NOTE =
   "Built-up 101 m² · living 52 m² · terrace 28 m² · private pool 10 m² · plot 230 m² (0.14 rai) · 1 bedroom · 30-year land lease";
