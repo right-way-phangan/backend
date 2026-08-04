@@ -97,13 +97,13 @@ const DESC_EN =
   "The Sands is a gated enclave of eleven villas set directly on Haad Yao, the long white-sand bay on the quiet north-west coast of Koh Phangan — calm, shallow water, a fringing reef offshore and open sunsets over the sea.\n\n" +
   "Six single-storey beachfront villas sit right on the sand, each with five bedrooms, six bathrooms and 530–545 m² of living space on plots of up to 915 m²; one beachfront villa is a three-bedroom home. Five further villas form a second row of two-storey homes with panoramic sea views and direct beach access, five bedrooms and 420–460 m² of living space. Every villa has a private pool, a landscaped garden, covered parking and floor-to-ceiling glass that opens the living space to the water.\n\n" +
   "Residents share a landscaped park and a wellness centre with a spa and gym; a reception building anchors the entrance. The project is under construction and a show villa already stands on the beach.\n\n" +
-  "A developer instalment plan is available. Right Way arranges the viewing.";
+  "A developer instalment plan is available. Right Way arranges the viewing. The developer handles the sale and your own lawyer checks the documents.";
 
 const DESC_RU =
   "The Sands — закрытый комплекс из одиннадцати вилл прямо на пляже Haad Yao, длинной бухте с белым песком на тихом северо-западном побережье Ко Пангана: спокойная мелкая вода, риф у берега и открытые закаты над морем.\n\n" +
   "Шесть одноэтажных вилл первой линии стоят прямо на песке — пять спален, шесть санузлов и 530–545 м² жилой площади на участках до 915 м²; одна вилла первой линии — с тремя спальнями. Ещё пять вилл образуют второй ряд двухэтажных домов с панорамным видом на море и прямым выходом к пляжу: пять спален и 420–460 м² жилой площади. У каждой виллы — приватный бассейн, ландшафтный сад, крытая парковка и панорамное остекление в пол, раскрывающее гостиную к воде.\n\n" +
   "В общем пользовании — ландшафтный парк и wellness-центр со спа и залом; у входа — здание ресепшн. Проект строится, на пляже уже построена шоу-вилла.\n\n" +
-  "Доступна рассрочка от застройщика. Показ объекта организует Right Way.";
+  "Доступна рассрочка от застройщика. Показ объекта организует Right Way. Сделку ведёт застройщик, документы проверяет ваш юрист.";
 
 const AREA_NOTE =
   "11 villas · plots 486–915 m² · living area 420–545 m² · ten 5-bed / 6-bath + one 3-bed · " +
