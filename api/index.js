@@ -2535,6 +2535,11 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "needsReview",
   // eyeball/approx coordinate flag (bulk seed of legacy plots without a survey)
   "coordsApprox",
+  // amenity flags — legacy migrated cards contradict the owner's own listing
+  // text (RW-0625 said "with terrace and pool" while pool was false, so the
+  // house never matched the pool filter); fixable without recreating the object
+  "pool",
+  "electricity",
   // off-plan лендинг (/projects) — сырой многострочный формат как в createObject
   "floorplanUrls",
   "videoUrls",
