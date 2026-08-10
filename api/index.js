@@ -2546,6 +2546,10 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "priceStages",
   "timeline",
   "team",
+  // условия сделки застройщика меняются между ревизиями прайса — актуализируются
+  // правкой карточки, не пересозданием проекта
+  "leasePrepayment",
+  "paymentTerms",
   // ход стройки (/projects/[slug]/construction) — массив записей с фото, не строка
   "constructionUpdates"
 ]);
