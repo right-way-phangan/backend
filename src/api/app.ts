@@ -75,6 +75,16 @@ const CONTACT_WEBHOOK_SECRET = process.env.TG_CONTACT_WEBHOOK_SECRET;
 const CONTACT_WEBHOOK_URL = "https://rightway-api.vercel.app/telegram/contact";
 const CRON_SECRET = process.env.CRON_SECRET; // Vercel sends it as `Bearer` on cron hits
 
+// Configuration errors must never quietly turn an internet-facing production
+// API or webhook into a public endpoint. Local development remains flexible.
+if (ON_VERCEL) {
+  if (!API_TOKEN) throw new Error("API_TOKEN is required on Vercel.");
+  if (CONTACT_BOT && !CONTACT_WEBHOOK_SECRET) {
+    throw new Error("TG_CONTACT_WEBHOOK_SECRET is required when the contact bot is enabled.");
+  }
+  if (!CRON_SECRET) throw new Error("CRON_SECRET is required on Vercel.");
+}
+
 const { db, driver, applyMigrations } = await createDb();
 // On Vercel each cold start would otherwise re-run migrate+seed; do them once at
 // deploy instead. Elsewhere (local/VPS) keep auto-migrate so deploy = pull+restart.

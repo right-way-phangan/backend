@@ -3707,6 +3707,13 @@ var CONTACT_BOT = process.env.TG_CONTACT_BOT_TOKEN ? {
 var CONTACT_WEBHOOK_SECRET = process.env.TG_CONTACT_WEBHOOK_SECRET;
 var CONTACT_WEBHOOK_URL = "https://rightway-api.vercel.app/telegram/contact";
 var CRON_SECRET = process.env.CRON_SECRET;
+if (ON_VERCEL) {
+  if (!API_TOKEN) throw new Error("API_TOKEN is required on Vercel.");
+  if (CONTACT_BOT && !CONTACT_WEBHOOK_SECRET) {
+    throw new Error("TG_CONTACT_WEBHOOK_SECRET is required when the contact bot is enabled.");
+  }
+  if (!CRON_SECRET) throw new Error("CRON_SECRET is required on Vercel.");
+}
 var { db, driver, applyMigrations } = await createDb();
 if (!ON_VERCEL) {
   await applyMigrations();
