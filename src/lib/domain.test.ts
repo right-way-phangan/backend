@@ -13,10 +13,13 @@ import assert from "node:assert/strict";
 import {
   toDomain,
   sortByRecentAndPremium,
-  type ObjectRow,
   type PhotoRow,
   type RealEstateObject,
 } from "./domain";
+
+// ObjectRow — внутренний тип модуля; берём его из сигнатуры самой функции,
+// чтобы не расширять публичный экспорт ради теста.
+type ObjectRow = Parameters<typeof toDomain>[0];
 
 function row(over: Partial<ObjectRow> = {}): ObjectRow {
   return {
