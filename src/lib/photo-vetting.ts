@@ -165,12 +165,33 @@ export function isBlockingDocument(v: VetVerdict): boolean {
  * выгорает при нулевом балансе) любая картинка проходила как фото, и скриншот
  * прайса застройщика становился публичной обложкой.
  */
-const DOC_LIKE_NAME =
-  /(chanote|чанот|title[-_\s]?deed|deed|nor[-_\s]?sor|price[-_\s]?list|pricelist|прайс|commission|комисси|contract|договор|расчёт|расчет|invoice|passport|паспорт|scan|скан|документ|survey|межев)/i;
+/**
+ * Токены-документы. Проверяются как ОТДЕЛЬНЫЕ слова (границы — не-буквенный
+ * символ или край имени), а не как подстроки: «survey» и «contract» ловили
+ * `aerial-survey-*.jpg` и `contractor-progress-*.jpg`, то есть законные фото
+ * земли и стройки, а безфотный объект скрывается из каталога молча.
+ */
+const DOC_TOKENS = [
+  "chanote", "чанот[а-яё]*", "титул[а-яё]*", "deed", "title[-_ ]?deed", "nor[-_ ]?sor", "ns3k?",
+  "price[-_ ]?list", "pricelist", "price[-_ ]?sheet", "прайс[а-яё]*(?:[-_ ]?лист[а-яё]*)?",
+  "commission", "комисси[а-яё]*", "komissiya", "цена[-_ ]?за[-_ ]?рай", "price[-_ ]?per[-_ ]?rai",
+  "contract", "договор[а-яё]*", "расч[её]т", "invoice", "receipt",
+  "passport", "паспорт[а-яё]*", "scan", "скан[а-яё]*", "документ[а-яё]*", "document",
+  // «survey» само по себе — это ещё и аэросъёмка участка (aerial-survey),
+  // законная обложка для земли по правилу медиа. Документом делает уточнение.
+  "land[-_ ]?survey", "topo(?:graphic)?[-_ ]?survey", "survey[-_ ]?plan",
+  "межев[а-яё]*", "кадастр[а-яё]*", "cadastr[a-z]*",
+];
+const DOC_LIKE_NAME = new RegExp(
+  `(?:^|[^a-z0-9а-яё])(?:${DOC_TOKENS.join("|")})(?:$|[^a-z0-9а-яё])`,
+  "i",
+);
 
 export function looksLikeDocumentName(url: string): boolean {
   try {
-    return DOC_LIKE_NAME.test(decodeURIComponent(new URL(url).pathname));
+    const u = new URL(url);
+    // Имя документа прячут и в query, и во фрагменте — проверяем всё вместе.
+    return DOC_LIKE_NAME.test(decodeURIComponent(u.pathname + u.search + u.hash));
   } catch {
     return DOC_LIKE_NAME.test(url);
   }

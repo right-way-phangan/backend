@@ -225,6 +225,13 @@
       "when": 1783416132304,
       "tag": "0030_match_profiles",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1788204610368,
+      "tag": "0032_schema_sync",
+      "breakpoints": true
     }
   ]
 }

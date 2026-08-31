@@ -153,6 +153,9 @@ export interface CreateObjectResult {
  */
 export const OBJECT_TYPES = ["Land", "Villa", "House", "Townhouse", "Apartment", "Project"] as const;
 
+/** Статусы каталога: PATCH принимал произвольную строку и прятал объект с сайта. */
+export const OBJECT_STATUSES = ["Active", "Reserved", "Sold", "Withdrawn", "Draft"] as const;
+
 export function rwPrefixForType(type: string): string {
   switch (type) {
     case "Land":
@@ -213,14 +216,16 @@ function positiveOrUndefined(n: unknown): number | undefined {
 export function parseArea(areaText?: string): { sqm?: number; rai?: number } {
   if (!areaText) return {};
   const s = String(areaText);
-  // (?<!-) — «-5 rai» это опечатка, а не площадь: раньше знак терялся и
-  // значение публиковалось как 5 rai.
-  const mRai = s.match(/(?<!-)(\d+(?:[.,]\d+)?)\s*rai\b/i);
-  const mNgan = s.match(/(?<!-)(\d+(?:[.,]\d+)?)\s*ngan\b/i);
-  const mWah = s.match(/(?<!-)(\d+(?:[.,]\d+)?)\s*sq\.?\s*wah\b/i);
+  // Отрицательная площадь — это опечатка, а не значение. Отклоняем ВЕСЬ ввод, а
+  // не отдельный матч: `(?<!-)` лишь сдвигал старт поиска вправо, и «-12 rai»
+  // превращалось в 2 rai, «-800 m2» — в 0. Минус любой формы, включая юникодный.
+  if (/[-−–—]\s*\d/.test(s)) return {};
+  const mRai = s.match(/(\d+(?:[.,]\d+)?)\s*rai\b/i);
+  const mNgan = s.match(/(\d+(?:[.,]\d+)?)\s*ngan\b/i);
+  const mWah = s.match(/(\d+(?:[.,]\d+)?)\s*sq\.?\s*wah\b/i);
   // `m[²2]\b` не срабатывал на «8400 m²»: JS `\b` — ASCII-only, после не-словесного
   // `²` границы нет. Явная альтернация единиц (m² / m2 / sqm / sq m / sq.m) вместо `\b`.
-  const mSqm = s.match(/(?<!-)(\d+(?:[\s,]\d{3})*(?:[.,]\d+)?)\s*(?:m²|m2\b|sq\.?\s?m)/i);
+  const mSqm = s.match(/(\d+(?:[\s,]\d{3})*(?:[.,]\d+)?)\s*(?:m²|m2\b|sq\.?\s?m)/i);
   const f = (m: RegExpMatchArray | null) =>
     m ? parseFloat(m[1].replace(",", ".").replace(/\s/g, "")) : 0;
   let sqm: number | undefined;
@@ -371,7 +376,10 @@ export function sanitizeConstructionUpdates(
     const photos = (Array.isArray(r.photos) ? r.photos : [])
       .map(str)
       .filter((p) => /^https?:\/\//i.test(p));
-    if (photos.length === 0) return [];
+    // Запись без фото — законная текстовая веха («залили фундамент», фото позже).
+    // Требование обязательного фото приводило к молчаливой потере записи целиком;
+    // отбрасываем только совсем пустые (ни даты, ни заметки).
+    if (photos.length === 0 && !str(r.date) && !str(r.note) && !str(r.noteRu)) return [];
     return [{
       date: str(r.date),
       dateRu: str(r.dateRu) || undefined,
@@ -692,8 +700,32 @@ export async function updateObject(
   patch: Record<string, unknown>,
 ): Promise<{ rwNumber: string } | null> {
   const set: Record<string, unknown> = { updatedAt: new Date() };
+  // Числовые и текстовые поля проходят те же проверки, что и при создании:
+  // PATCH — это бот /edit и инлайн-редактор карточки, второй по частоте путь
+  // записи, и раньше он клал значение в колонку как есть.
+  const MONEY_FIELDS = new Set([
+    "priceThb", "pricePerRai", "rentPerMonth", "rentPerRaiMonth",
+    "leasePrepayment", "leaseTermYears", "bedrooms", "bathrooms",
+    "unitsTotal", "netYieldPct", "areaRai", "areaSqm",
+  ]);
+  const TEXT_FIELDS = new Set(["descriptionRaw", "descriptionManualEn", "descriptionManualRu"]);
   for (const [k, v] of Object.entries(patch)) {
     if (!PATCHABLE.has(k as keyof ObjectInsert)) continue;
+    if (MONEY_FIELDS.has(k)) {
+      set[k] = v == null ? null : positiveOrUndefined(v) ?? null;
+      continue;
+    }
+    if (TEXT_FIELDS.has(k)) {
+      set[k] = typeof v === "string" && v.trim() ? redactConfidential(v.trim()) : null;
+      continue;
+    }
+    if (k === "status") {
+      set[k] = OBJECT_STATUSES.includes(String(v) as (typeof OBJECT_STATUSES)[number])
+        ? v
+        : undefined;
+      if (set[k] === undefined) delete set[k];
+      continue;
+    }
     if (k === "plotPolygon") {
       // Явный null очищает контур; непустое, но неразобранное значение —
       // это ошибка ввода, и молча стирать по нему готовый контур нельзя
@@ -723,7 +755,14 @@ export async function updateObject(
       continue;
     }
     if (k === "constructionUpdates" && Array.isArray(v)) {
-      set[k] = v;
+      // Массив и должен чиститься: ветка «принимаем как есть» сделала
+      // sanitizeConstructionUpdates мёртвым кодом, и в jsonb, который рендерит
+      // /projects/[slug]/construction, ложились javascript:-ссылки.
+      const clean = sanitizeConstructionUpdates(v);
+      if (v.length === 0) set[k] = null; // пустой массив = осознанная очистка
+      else if (clean && clean.length) set[k] = clean;
+      // иначе прислали записи, из которых не осталось ни одной валидной —
+      // это ошибка ввода, а не команда стереть уже накопленный журнал
       continue;
     }
     if (k === "priceStages" || k === "timeline" || k === "team") {
