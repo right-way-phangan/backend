@@ -144,8 +144,16 @@ const CONTACT_LINE_RE =
 const REDACT_DEED =
   /\b(chanote|чанот[а-я]*|title\s*deed)\b([^.,;)\n]{0,20}?)\b(?:no\.?|number|№|#|deed\s*no\.?|เลขที่)\s*#?\s*\d{3,}[/\d-]*/gi;
 // Комиссия с числом/процентом — наша внутренняя экономика, не в публикацию.
-const REDACT_COMMISSION =
-  /\b(?:commission|комисси[яюейи])\b[\s:–-]*\d{0,2}(?:\.\d+)?\s*%?|(?:\d{1,2}(?:\.\d+)?\s*%)\s*(?:commission|комисс\w*)/gi;
+// Без \b: в JS граница слова считается по ASCII, поэтому «\bкомиссионные» не
+// срабатывало вовсе (пробел и «к» оба не-\w). Отсюда явные просмотры по буквам.
+const LETTER = "[a-zа-яё]";
+const COMMISSION_WORD = `(?<!${LETTER})(?:commissions?|комисси[а-яё]*)(?!${LETTER})`;
+const COMMISSION_GAP = "(?:[\\s:–-]|of\\b|в\\s+размере)*";
+const REDACT_COMMISSION = new RegExp(
+  `${COMMISSION_WORD}${COMMISSION_GAP}\\d{0,2}(?:\\.\\d+)?\\s*%?` +
+    `|(?:\\d{1,2}(?:\\.\\d+)?\\s*%)\\s*${COMMISSION_WORD}`,
+  "gi",
+);
 // Расчётный лист / прайс-лист застройщика — вырезаем фразу целиком.
 const REDACT_PRICELIST =
   /[^.\n]*(?:расчётн\w*\s+лист|developer'?s?\s+price\s*list|прайс[\s-]*лист\s+застройщ\w*)[^.\n]*/gi;
@@ -154,9 +162,18 @@ const REDACT_PRICELIST =
 // обязателен, чтобы не ловить «(Chanote): 800 m²». Описание к этому моменту уже
 // отредактировано; срабатывает в основном на структурных полях (тайтл).
 const HARD_CONFIDENTIAL: Array<{ re: RegExp; label: string }> = [
-  { re: /\b(commission|комисси[яюейи])\b[\s:–-]*\d{1,2}(\.\d+)?\s*%/i, label: "комиссия" },
-  { re: /(\d{1,2}(\.\d+)?\s*%)\s*(commission|комисс)/i, label: "комиссия %" },
+  {
+    re: new RegExp(`${COMMISSION_WORD}${COMMISSION_GAP}\\d{1,2}(\\.\\d+)?\\s*%`, "i"),
+    label: "комиссия",
+  },
+  { re: new RegExp(`(\\d{1,2}(\\.\\d+)?\\s*%)\\s*${COMMISSION_WORD}`, "i"), label: "комиссия %" },
   { re: /\b(chanote|чанот[а-я]*|title\s*deed)\b[^.\n]{0,20}?\b(no\.?|number|№|#|deed\s*no\.?|เลขที่)\s*#?\s*\d{3,}/i, label: "номер документа" },
+  // Голый номер без индикатора: «Chanote 13681». Отсекаем измерения — за
+  // площадью/градусами всегда идёт единица («Chanote: 1600 m²», «360 degrees»).
+  {
+    re: /\b(chanote|чанот[а-я]*|title\s*deed)\b[^.\n]{0,20}?\b\d{4,}\b(?!\s*(?:m²|m2|sqm|sq\.?\s*m|rai|ngan|wah|degrees|°|рай|нган|ва|м²|кв))/i,
+    label: "номер документа (без индикатора)",
+  },
   { re: /(расчётн\w*\s+лист|developer'?s?\s+price\s*list|прайс[\s-]*лист\s+застройщ)/i, label: "прайс-лист застройщика" },
 ];
 
@@ -182,18 +199,15 @@ function pickDescriptionSource(o: RealEstateObject, lang: PublishLang, warnings:
   return undefined;
 }
 
-/** Чистка описания: системные префиксы, строки-контакты, кириллица в EN, длина. */
-export function sanitizeDescription(
-  raw: string | undefined,
-  lang: PublishLang,
-  warnings: string[] = [],
-): string | undefined {
-  if (!raw) return undefined;
-  let s = raw.replace("СООБЩЕНИЕ ОТ СОБСТВЕННИКА/БРОКЕРА:", "");
-  s = s.split("ОТВЕТЫ ИЗ ОПРОСА:")[0];
-  // Редактируем конфиденциальные фрагменты (номер документа / комиссия / прайс-лист),
-  // сохраняя остальное описание — не теряем инвентарь из-за одной строки.
-  s = s.replace(REDACT_DEED, (_m, kw) => {
+/**
+ * Редакция конфиденциального из свободного текста: номер документа, комиссия,
+ * прайс-лист застройщика, строки с контактами. Вызывается и при публикации, и
+ * при ЗАПИСИ объекта: descriptionRaw уходит в публичный payload /objects, а
+ * собирается он из присланного описания — до этого текст не проходил санитайзер
+ * вообще, и телефон собственника попадал на сайт.
+ */
+export function redactConfidential(raw: string, warnings: string[] = []): string {
+  let s = raw.replace(REDACT_DEED, (_m, kw) => {
     warnings.push("из описания убран номер документа (чанот)");
     return kw;
   });
@@ -205,13 +219,30 @@ export function sanitizeDescription(
     warnings.push("из описания убрано упоминание прайс-листа застройщика");
     return "";
   });
-  const kept = s.split(/\r?\n/).filter((ln) => {
-    if (CONTACT_LINE_RE.test(ln)) {
-      warnings.push("из описания вырезана строка с контактом/телефоном");
-      return false;
-    }
-    return true;
-  });
+  return s
+    .split(/\r?\n/)
+    .filter((ln) => {
+      if (CONTACT_LINE_RE.test(ln)) {
+        warnings.push("из описания вырезана строка с контактом/телефоном");
+        return false;
+      }
+      return true;
+    })
+    .join("\n");
+}
+
+/** Чистка описания: системные префиксы, строки-контакты, кириллица в EN, длина. */
+export function sanitizeDescription(
+  raw: string | undefined,
+  lang: PublishLang,
+  warnings: string[] = [],
+): string | undefined {
+  if (!raw) return undefined;
+  let s = raw.replace("СООБЩЕНИЕ ОТ СОБСТВЕННИКА/БРОКЕРА:", "");
+  s = s.split("ОТВЕТЫ ИЗ ОПРОСА:")[0];
+  // Редактируем конфиденциальные фрагменты, сохраняя остальное описание —
+  // не теряем инвентарь из-за одной строки.
+  const kept = redactConfidential(s, warnings).split(/\r?\n/);
   s = kept.join("\n").replace(/\s+/g, " ").trim();
   if (lang === "en" && CYRILLIC_RE.test(s)) {
     warnings.push("описание содержит кириллицу — убрано из EN-поста");

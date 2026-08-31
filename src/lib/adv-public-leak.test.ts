@@ -44,13 +44,15 @@ after(async () => {
 // вводим в поле `description` при заведении объекта (POST /objects → /admin/new)
 // | ОЖИДАЕТСЯ: PII и комиссия не уходят в публичный payload — как это сделано для
 //   отдельного поля `commission` (оно кладётся в outreachNote и вырезается стриппером)
-// | ФАКТ: `description` дословно склеивается в `descriptionRaw`, а `descriptionRaw`
-//   НЕ входит в blocklist stripSellerPii — телефон собственника и «комиссия 5%»
-//   отдаются публичным `GET /objects`. Для type=Project текст к тому же реально
-//   рендерится на лендинге и в <meta name="description">
-//   (web/src/components/projects/project-landing.tsx:111, web/src/app/projects/[slug]/page.tsx:30)
-// | код: src/lib/write.ts:398-400,467-468 + src/lib/queries.ts:140-162
-test("АТАКА 1: телефон собственника и комиссия из description утекают в публичный /objects", async () => {
+// | БЫЛО: `description` дословно склеивался в `descriptionRaw`, который НЕ входит
+//   в blocklist stripSellerPii — телефон собственника и «комиссия 5%» отдавались
+//   публичным `GET /objects`; для type=Project текст к тому же рендерится на
+//   лендинге и в <meta name="description">
+// | ИСПРАВЛЕНО 2026-08-31: путь записи прогоняет текст через redactConfidential
+//   (та же редакция, что и при публикации). Поле оставлено в payload намеренно:
+//   лендинги проектов читают из него свой контент.
+// | код: src/lib/write.ts:398-407,470-473 + src/lib/publishable.ts:186-212
+test("АТАКА 1: телефон и комиссия из description не доезжают до публичного /objects", async () => {
   const res = await createObject(db, {
     type: "Land",
     district: "Sri Thanu",
@@ -66,14 +68,32 @@ test("АТАКА 1: телефон собственника и комиссия 
   const o = pub.find((x) => x.rwNumber === res.rwNumber);
   assert.ok(o, "объект должен быть в публичной выдаче");
 
-  // Комиссия из отдельного поля действительно вырезана — защита работает…
+  // Комиссия из отдельного поля вырезана, как и раньше…
   assert.equal((o as Record<string, unknown>).outreachNote, undefined);
 
-  // …но тот же самый секрет, введённый текстом, уходит наружу целиком:
-  assert.match(o!.descriptionRaw ?? "", /\+66 84 362 7784/);
-  assert.match(o!.descriptionRaw ?? "", /commission 5%/i);
-  assert.match(o!.descriptionRaw ?? "", /LINE somchai88/);
-  assert.match(o!.descriptionRaw ?? "", /Khun Somchai/);
+  // …и тот же секрет, введённый свободным текстом, наружу больше не уходит.
+  const desc = o!.descriptionRaw ?? "";
+  assert.doesNotMatch(desc, /\+66 84 362 7784/);
+  assert.doesNotMatch(desc, /commission 5%/i);
+  assert.doesNotMatch(desc, /LINE somchai88/);
+
+  // Строка целиком была контактной — от блока не остался и осиротевший заголовок.
+  assert.equal(desc.includes("СООБЩЕНИЕ ОТ СОБСТВЕННИКА/БРОКЕРА"), false);
+});
+
+// Контроль: безопасное описание сохраняется дословно — редакция не съедает инвентарь.
+test("АТАКА 1-контроль: обычное описание остаётся в публичном payload как есть", async () => {
+  const res = await createObject(db, {
+    type: "Land",
+    district: "Sri Thanu",
+    priceThb: 8_000_000,
+    description: "Flat plot, 15 minutes to Thong Sala, water and power at the boundary.",
+    photoUrls: ["https://cdn.example/r2/plot-2.jpg"],
+  });
+
+  const pub = await getPublicObjects(db);
+  const o = pub.find((x) => x.rwNumber === res.rwNumber);
+  assert.match(o!.descriptionRaw ?? "", /15 minutes to Thong Sala/);
 });
 
 // АТАКА 2 [HIGH]: заливаем скриншот прайс-листа застройщика как единственное фото
@@ -85,7 +105,7 @@ test("АТАКА 1: телефон собственника и комиссия 
 //   publishable.ts, для Telegram-каналов), фото становится ОБЛОЖКОЙ и объект
 //   публикуется — гейт «безфотные скрыты» наоборот его открывает
 // | код: src/lib/photo-vetting.ts:97-99,137-139 + src/lib/write.ts:511-521 + src/lib/queries.ts:186
-test("АТАКА 2: скриншот прайса застройщика становится публичной обложкой при выключенном вет-гейте", async () => {
+test("АТАКА 2: скриншот прайса и скан чанота не попадают в фото объекта", async () => {
   const res = await createObject(db, {
     type: "Villa",
     district: "Ban Tai",
@@ -95,14 +115,27 @@ test("АТАКА 2: скриншот прайса застройщика ста�
       "https://cdn.example/r2/chanote-scan-13681.jpg",
     ],
   });
-  // Ни одно фото не отклонено — гейт молча пропустил оба документа.
-  assert.equal(res.rejectedPhotos, undefined);
+  // ИСПРАВЛЕНО 2026-08-31: имя файла проверяется всегда, даже когда вижн-гейт
+  // выключен (ключ выгорает при нулевом балансе) — оба документа отклонены.
+  assert.equal(res.rejectedPhotos?.length, 2);
 
   const pub = await getPublicObjects(db);
   const o = pub.find((x) => x.rwNumber === res.rwNumber);
-  assert.ok(o, "объект опубликован");
-  assert.equal(o!.coverImage, "https://cdn.example/r2/developer-pricelist-commission-sheet.png");
-  assert.ok(o!.gallery?.includes("https://cdn.example/r2/chanote-scan-13681.jpg"));
+  // Фото не осталось вовсе → объект не проходит гейт «безфотные скрыты».
+  assert.equal(o, undefined, "без единого настоящего фото объект не публикуется");
+});
+
+test("АТАКА 2-контроль: обычные фото проходят и становятся обложкой", async () => {
+  const res = await createObject(db, {
+    type: "Villa",
+    district: "Ban Tai",
+    priceThb: 12_000_000,
+    photoUrls: ["https://cdn.example/r2/villa-exterior.jpg", "https://cdn.example/r2/pool.jpg"],
+  });
+  assert.equal(res.rejectedPhotos ?? undefined, undefined, "нормальные фото не отклоняются");
+
+  const o = (await getPublicObjects(db)).find((x) => x.rwNumber === res.rwNumber);
+  assert.equal(o?.coverImage, "https://cdn.example/r2/villa-exterior.jpg");
 });
 
 // АТАКА 3 [MEDIUM]: приватная ссылка на Drive-папку объекта и внутренний

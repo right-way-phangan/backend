@@ -21,6 +21,7 @@ import { partitionByVetting, type VetVerdict } from "./photo-vetting";
 import type { ObjectInsert } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
 import { generateObjectTitle, type TitleAttrs } from "./object-title";
+import { redactConfidential } from "./publishable";
 
 export class ObjectInputError extends Error {}
 
@@ -145,6 +146,13 @@ export interface CreateObjectResult {
 }
 
 // ---- RW numbering (CLAUDE.md scheme) ----
+/**
+ * Типы, для которых определена серия RW (CLAUDE.md). Неизвестный тип раньше
+ * молча уезжал в серию «RW-X» и попутно отключал все land-проверки
+ * (isLand === false), включая сокрытие координат участка при публикации.
+ */
+export const OBJECT_TYPES = ["Land", "Villa", "House", "Townhouse", "Apartment", "Project"] as const;
+
 export function rwPrefixForType(type: string): string {
   switch (type) {
     case "Land":
@@ -196,16 +204,23 @@ export async function getNextUnitNumber(db: AnyPgDatabase, parentRw: string): Pr
   return `${projectRw}-${max + 1}`;
 }
 
+/** Деньги и площади не бывают отрицательными: −9 500 000 THB публиковался как цена. */
+function positiveOrUndefined(n: unknown): number | undefined {
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 // ---- free-text parsers (port of object-writer.ts) ----
 export function parseArea(areaText?: string): { sqm?: number; rai?: number } {
   if (!areaText) return {};
   const s = String(areaText);
-  const mRai = s.match(/(\d+(?:[.,]\d+)?)\s*rai\b/i);
-  const mNgan = s.match(/(\d+(?:[.,]\d+)?)\s*ngan\b/i);
-  const mWah = s.match(/(\d+(?:[.,]\d+)?)\s*sq\.?\s*wah\b/i);
+  // (?<!-) — «-5 rai» это опечатка, а не площадь: раньше знак терялся и
+  // значение публиковалось как 5 rai.
+  const mRai = s.match(/(?<!-)(\d+(?:[.,]\d+)?)\s*rai\b/i);
+  const mNgan = s.match(/(?<!-)(\d+(?:[.,]\d+)?)\s*ngan\b/i);
+  const mWah = s.match(/(?<!-)(\d+(?:[.,]\d+)?)\s*sq\.?\s*wah\b/i);
   // `m[²2]\b` не срабатывал на «8400 m²»: JS `\b` — ASCII-only, после не-словесного
   // `²` границы нет. Явная альтернация единиц (m² / m2 / sqm / sq m / sq.m) вместо `\b`.
-  const mSqm = s.match(/(\d+(?:[\s,]\d{3})*(?:[.,]\d+)?)\s*(?:m²|m2\b|sq\.?\s?m)/i);
+  const mSqm = s.match(/(?<!-)(\d+(?:[\s,]\d{3})*(?:[.,]\d+)?)\s*(?:m²|m2\b|sq\.?\s?m)/i);
   const f = (m: RegExpMatchArray | null) =>
     m ? parseFloat(m[1].replace(",", ".").replace(/\s/g, "")) : 0;
   let sqm: number | undefined;
@@ -216,7 +231,9 @@ export function parseArea(areaText?: string): { sqm?: number; rai?: number } {
   let raiF = f(mRai) + f(mNgan) * 0.25 + f(mWah) * 0.0025;
   if (raiF === 0 && sqm != null) raiF = sqm / 1600;
   if (sqm == null && raiF > 0) sqm = Math.round(raiF * 1600);
-  const rai = raiF >= 0.5 ? Math.max(1, Math.round(raiF)) : undefined;
+  // area_rai — double precision, а целое округление врало покупателю: 800 m²
+  // превращались в «1 rai» (вдвое), «3 rai 2 ngan» — в 4 rai при 5600 m².
+  const rai = raiF > 0 ? Math.round(raiF * 100) / 100 : undefined;
   return { sqm, rai };
 }
 
@@ -274,6 +291,20 @@ function parseLatLng(url?: string): { lat?: number; lng?: number } {
  * coordinates out of each Location header (the first hop already carries ?q=).
  * Network failures degrade to {} — the caller keeps locationUrl without coords.
  */
+/** Хосты карт, по которым разрешено ходить за координатами. */
+const MAP_HOSTS = new Set([
+  "maps.app.goo.gl", "goo.gl", "maps.google.com", "www.google.com", "google.com",
+  "maps.apple.com", "www.openstreetmap.org", "openstreetmap.org", "osm.org",
+]);
+
+function isMapHost(u: string): boolean {
+  try {
+    return MAP_HOSTS.has(new URL(u).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 export async function resolveLatLngFromUrl(
   url?: string,
 ): Promise<{ lat?: number; lng?: number }> {
@@ -284,8 +315,13 @@ export async function resolveLatLngFromUrl(
   try {
     let target = url;
     for (let i = 0; i < 5; i++) {
+      // Ходим только по картографическим хостам и только с таймаутом: раньше
+      // это был SSRF-примитив — сервер дёргал любой присланный URL, включая
+      // внутренние адреса, и следовал за редиректами без ограничения времени.
+      if (!isMapHost(target)) return {};
       const res = await fetch(target, {
         redirect: "manual",
+        signal: AbortSignal.timeout(5000),
         headers: { "user-agent": "Mozilla/5.0 (compatible; RightWayBot/1.0)" },
       });
       const loc = res.headers.get("location");
@@ -397,7 +433,14 @@ function buildRow(input: NewObjectInput, rwNumber: string, title: string): Objec
 
   const descParts: string[] = [];
   if (input.description?.trim()) {
-    descParts.push("СООБЩЕНИЕ ОТ СОБСТВЕННИКА/БРОКЕРА:\n" + input.description.trim());
+    // Свободный текст от собственника/брокера уезжает в descriptionRaw, а тот —
+    // в публичный payload /objects (и в <meta description> лендинга проекта).
+    // Санитайзера на этом пути не было: телефон, комиссия и номер чанота из
+    // сообщения попадали на сайт дословно.
+    const safe = redactConfidential(input.description.trim()).trim();
+    // Если после редакции не осталось ничего (сообщение было одним телефоном) —
+    // не сохраняем осиротевший заголовок блока.
+    if (safe) descParts.push("СООБЩЕНИЕ ОТ СОБСТВЕННИКА/БРОКЕРА:\n" + safe);
   }
 
   const row: ObjectInsert = {
@@ -414,11 +457,11 @@ function buildRow(input: NewObjectInput, rwNumber: string, title: string): Objec
     areaRai: input.type === "Land" ? rai : undefined,
     areaNote: input.area,
 
-    priceThb: input.priceThb,
-    pricePerRai: input.pricePerRai,
+    priceThb: positiveOrUndefined(input.priceThb),
+    pricePerRai: positiveOrUndefined(input.pricePerRai),
     rentPerRaiMonth: input.rentPerRaiMonth,
-    rentPerMonth: input.rentPerMonth,
-    leaseTermYears: input.leaseTermYears,
+    rentPerMonth: positiveOrUndefined(input.rentPerMonth),
+    leaseTermYears: positiveOrUndefined(input.leaseTermYears),
     leaseEscPercent: esc.percent,
     leaseEscPeriodYears: esc.periodYears,
     leaseEscNotes: esc.notes,
@@ -432,8 +475,8 @@ function buildRow(input: NewObjectInput, rwNumber: string, title: string): Objec
     internetType: input.internetType,
     terrain: input.type === "Land" ? input.terrain : undefined,
 
-    bedrooms: isBuilding ? input.bedrooms : undefined,
-    bathrooms: isBuilding ? input.bathrooms : undefined,
+    bedrooms: isBuilding ? positiveOrUndefined(input.bedrooms) : undefined,
+    bathrooms: isBuilding ? positiveOrUndefined(input.bathrooms) : undefined,
     buildYear: isBuilding ? input.buildYear : undefined,
     condition: isBuilding ? input.condition : undefined,
 
@@ -465,7 +508,8 @@ function buildRow(input: NewObjectInput, rwNumber: string, title: string): Objec
 
     // Pre-composed block (bot) wins; otherwise compose from the message only.
     descriptionRaw:
-      input.descriptionRaw?.trim() || (descParts.length ? descParts.join("\n\n") : undefined),
+      (input.descriptionRaw?.trim() ? redactConfidential(input.descriptionRaw.trim()) : undefined) ||
+      (descParts.length ? descParts.join("\n\n") : undefined),
     dateAdded: String(Math.floor(Date.now() / 1000)),
   };
 
@@ -488,6 +532,11 @@ export async function createObject(
   db: AnyPgDatabase,
   input: NewObjectInput,
 ): Promise<CreateObjectResult> {
+  if (!OBJECT_TYPES.includes(input.type as (typeof OBJECT_TYPES)[number])) {
+    throw new ObjectInputError(
+      `Неизвестный тип объекта «${input.type}». Допустимые: ${OBJECT_TYPES.join(", ")}.`,
+    );
+  }
   const rwNumber = input.parentProjectRw?.trim()
     ? await getNextUnitNumber(db, input.parentProjectRw)
     : await getNextRwNumber(db, input.type);
@@ -646,13 +695,35 @@ export async function updateObject(
   for (const [k, v] of Object.entries(patch)) {
     if (!PATCHABLE.has(k as keyof ObjectInsert)) continue;
     if (k === "plotPolygon") {
-      set[k] = v == null ? null : (sanitizePolygon(v) ?? null);
+      // Явный null очищает контур; непустое, но неразобранное значение —
+      // это ошибка ввода, и молча стирать по нему готовый контур нельзя
+      // (одна кривая вершина уничтожала весь обвод участка при 200 OK).
+      if (v == null) {
+        set[k] = null;
+        continue;
+      }
+      const poly = sanitizePolygon(v);
+      if (poly) set[k] = poly;
       continue;
     }
     // Off-plan landing fields take the same raw multiline strings as createObject
     // and get the same coercion — never store the raw string in jsonb. Empty/null clears.
+    // Массив из структурного клиента принимаем как есть: раньше сюда попадала
+    // ветка «не строка → null», и PATCH молча стирал поле, отвечая 200 OK.
+    if ((k === "floorplanUrls" || k === "videoUrls") && Array.isArray(v)) {
+      set[k] = v;
+      continue;
+    }
     if (k === "floorplanUrls" || k === "videoUrls") {
       set[k] = typeof v === "string" ? parseUrls(v) ?? null : null;
+      continue;
+    }
+    if ((k === "priceStages" || k === "timeline" || k === "team") && Array.isArray(v)) {
+      set[k] = v;
+      continue;
+    }
+    if (k === "constructionUpdates" && Array.isArray(v)) {
+      set[k] = v;
       continue;
     }
     if (k === "priceStages" || k === "timeline" || k === "team") {

@@ -38,28 +38,27 @@ after(async () => {
 // АТАКА 5 [HIGH]: POST /objects с `type` в другом регистре («land» вместо «Land»)
 // | ОЖИДАЕТСЯ: 400 «неизвестный тип» ИЛИ нормализация к «Land» — нумерация по типам
 //   зафиксирована решением (RW-L/V/A/P), тип участвует в бизнес-логике
-// | ФАКТ: тип не валидируется нигде. rwPrefixForType — case-sensitive switch →
-//   объект получает несуществующую серию RW-X0001, а вся land-специфичная логика
-//   (`o.type === "Land"`) отключается. Как следствие гейт публикации ВЫДАЁТ наружу
-//   карту участка земли — ровно то, что publishable.ts запрещает («тизер раскрывает
-//   участок до Land Office»), и подставляет bedrooms/bathrooms земле
-// | код: src/lib/write.ts:148-163 (нет default-валидации) + src/lib/publishable.ts:322,340
-test("АТАКА 5: type в нижнем регистре ломает серию (RW-X) и снимает land-защиты", async () => {
-  const res = await createObject(db, {
-    type: "land", // ← клиент/бот прислал в нижнем регистре
-    district: "Sri Thanu",
-    priceThb: 5_000_000,
-    locationUrl: "https://maps.google.com/?q=9.7500,100.0000",
-    photoUrls: ["https://cdn.example/r2/plot.jpg"],
-  });
-  assert.equal(res.rwNumber, "RW-X0001", "несуществующая серия RW-X");
+// | БЫЛО: тип не валидировался нигде, rwPrefixForType — case-sensitive switch, и
+//   объект получал несуществующую серию RW-X0001, а вся land-специфичная логика
+//   (`o.type === "Land"`) отключалась: гейт публикации ВЫДАВАЛ наружу карту участка
+//   земли — ровно то, что publishable.ts запрещает
+// | ИСПРАВЛЕНО 2026-08-31: белый список OBJECT_TYPES на входе createObject
+// | код: src/lib/write.ts:148-156,536-540
+test("АТАКА 5: неизвестный тип отклоняется, серия RW-X не создаётся", async () => {
+  await assert.rejects(
+    () =>
+      createObject(db, {
+        type: "land", // ← клиент/бот прислал в нижнем регистре
+        district: "Sri Thanu",
+        priceThb: 5_000_000,
+        locationUrl: "https://maps.google.com/?q=9.7500,100.0000",
+        photoUrls: ["https://cdn.example/r2/plot.jpg"],
+      }),
+    /Неизвестный тип объекта/,
+  );
 
   const pub = await getPublicObjects(db);
-  const o = pub.find((x) => x.rwNumber === "RW-X0001")!;
-  const p = toPublishable(o, { channel: "telegram", lang: "en" });
-  assert.equal(p.ok, true);
-  // Земельный участок ушёл бы в канал вместе с точной картой:
-  assert.equal(p.ok && p.object.mapUrl, "https://maps.google.com/?q=9.7500,100.0000");
+  assert.equal(pub.some((x) => x.rwNumber.startsWith("RW-X")), false);
 });
 
 // АТАКА 6 [MEDIUM]: два одновременных POST /objects одного типа
@@ -90,11 +89,12 @@ test("АТАКА 6: гонка присвоения RW-номера — пара
 // формате (массив), а не многострочной строкой
 // | ОЖИДАЕТСЯ: либо принять массив (объект отдаётся клиенту именно массивом —
 //   domain.ts:87-91), либо 400
-// | ФАКТ: updateObject принимает ТОЛЬКО string; любой другой тип молча пишет null.
-//   Клиент, сделавший read-modify-write (взял videoUrls/priceStages из GET, поправил,
-//   отправил обратно), СТИРАЕТ данные и получает 200 OK
-// | код: src/lib/write.ts:654-661
-test("АТАКА 7: PATCH массивом молча стирает videoUrls / priceStages / timeline / team", async () => {
+// | БЫЛО: updateObject принимал ТОЛЬКО string, любой другой тип молча писал null —
+//   клиент, сделавший read-modify-write (взял videoUrls/priceStages из GET, поправил,
+//   отправил обратно), СТИРАЛ данные и получал 200 OK
+// | ИСПРАВЛЕНО 2026-08-31: массив принимается как есть
+// | код: src/lib/write.ts:701-717
+test("АТАКА 7: PATCH массивом сохраняет videoUrls / priceStages, а не стирает их", async () => {
   const { rwNumber } = await createObject(db, {
     type: "Project",
     priceThb: 9_000_000,
@@ -112,8 +112,8 @@ test("АТАКА 7: PATCH массивом молча стирает videoUrls /
   });
 
   const [row] = await db.select().from(schema.objects).where(eq(schema.objects.rwNumber, rwNumber));
-  assert.equal(row.videoUrls, null, "видео стёрты");
-  assert.equal(row.priceStages, null, "этапы оплаты стёрты");
+  assert.equal(row.videoUrls?.length, 3, "третье видео добавлено, прежние на месте");
+  assert.equal(row.priceStages?.length, 2, "этапы оплаты сохранены");
 });
 
 // АТАКА 8 [MEDIUM]: PATCH с контуром участка, у которого одна вершина вне
@@ -124,7 +124,7 @@ test("АТАКА 7: PATCH массивом молча стирает videoUrls /
 //   а updateObject превращает undefined в NULL → ранее обведённый контур участка
 //   уничтожается. То же с constructionUpdates (запись без фото → весь журнал стройки null)
 // | код: src/lib/write.ts:310-324, 648-651, 664-667
-test("АТАКА 8: невалидная вершина в PATCH plotPolygon стирает уже сохранённый контур", async () => {
+test("АТАКА 8: невалидная вершина в PATCH plotPolygon не стирает сохранённый контур", async () => {
   const { rwNumber } = await createObject(db, {
     type: "Land",
     priceThb: 4_000_000,
@@ -146,10 +146,16 @@ test("АТАКА 8: невалидная вершина в PATCH plotPolygon с�
     ],
   });
   const [after] = await db.select().from(schema.objects).where(eq(schema.objects.rwNumber, rwNumber));
-  assert.equal(after.plotPolygon, null, "контур уничтожен целиком");
+  // ИСПРАВЛЕНО 2026-08-31: неразобранное значение игнорируется, прежний контур цел;
+  // очистить контур по-прежнему можно явным null.
+  assert.equal(after.plotPolygon?.length, 3, "прежний контур сохранён");
+
+  await updateObject(db, rwNumber, { plotPolygon: null });
+  const [cleared] = await db.select().from(schema.objects).where(eq(schema.objects.rwNumber, rwNumber));
+  assert.equal(cleared.plotPolygon, null, "явный null очищает");
 });
 
-test("АТАКА 8a: запись хода стройки без фото стирает весь журнал стройки", async () => {
+test("АТАКА 8a: запись хода стройки без фото не стирает журнал стройки", async () => {
   const { rwNumber } = await createObject(db, { type: "Project", priceThb: 8_000_000 });
   await updateObject(db, rwNumber, {
     constructionUpdates: [{ date: "2026-07", note: "Фундамент", photos: ["https://cdn.example/1.jpg"] }],
@@ -165,15 +171,16 @@ test("АТАКА 8a: запись хода стройки без фото сти
     ],
   });
   const [after] = await db.select().from(schema.objects).where(eq(schema.objects.rwNumber, rwNumber));
-  assert.equal(after.constructionUpdates, null, "журнал стройки стёрт");
+  assert.equal(after.constructionUpdates?.length, 2, "обе записи журнала на месте");
 });
 
 // АТАКА 9 [MEDIUM]: POST /objects с отрицательной / абсурдной ценой
 // | ОЖИДАЕТСЯ: валидация диапазона (цена > 0), иначе 400
-// | ФАКТ: числовые поля не валидируются вообще. Отрицательная цена проходит гейт
-//   «пустого стаба» (hasListingSubstance смотрит только на truthy) и публикуется
-// | код: src/lib/write.ts:417-419 (нет проверок) + src/lib/queries.ts:171-180
-test("АТАКА 9: отрицательная цена публикуется в каталоге как валидный листинг", async () => {
+// | БЫЛО: числовые поля не валидировались вообще, отрицательная цена проходила гейт
+//   «пустого стаба» (hasListingSubstance смотрит только на truthy) и публиковалась
+// | ИСПРАВЛЕНО 2026-08-31: деньги, комнаты и сроки принимаются только положительными
+// | код: src/lib/write.ts:203-206 (positiveOrUndefined)
+test("АТАКА 9: отрицательные цена и комнаты не сохраняются", async () => {
   const { rwNumber } = await createObject(db, {
     type: "Villa",
     priceThb: -12_000_000,
@@ -181,9 +188,11 @@ test("АТАКА 9: отрицательная цена публикуется �
     bedrooms: -3,
     photoUrls: ["https://cdn.example/r2/v.jpg"],
   });
-  const o = (await getPublicObjects(db)).find((x) => x.rwNumber === rwNumber)!;
-  assert.equal(o.priceThb, -12_000_000);
-  assert.equal(o.bedrooms, -3);
-  const p = toPublishable(o, { channel: "telegram", lang: "en" });
-  assert.equal(p.ok, true, "гейт публикации пропускает отрицательную цену");
+  const [row] = await db.select().from(schema.objects).where(eq(schema.objects.rwNumber, rwNumber));
+  assert.equal(row.priceThb, null, "отрицательная цена отброшена");
+  assert.equal(row.bedrooms, null);
+  assert.equal(row.pricePerRai, null);
+
+  // Без цены объект — пустой стаб: в публичный каталог он теперь не попадает.
+  assert.equal((await getPublicObjects(db)).some((x) => x.rwNumber === rwNumber), false);
 });

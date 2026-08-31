@@ -159,6 +159,23 @@ export function isBlockingDocument(v: VetVerdict): boolean {
 }
 
 /** Split URLs into ones safe to publish and ones rejected as documents. */
+/**
+ * Имена, по которым файл виден как документ/прайс без всякой вижн-модели.
+ * Нужны потому, что весь вет-гейт fail-OPEN: без ANTHROPIC_API_KEY (а ключ
+ * выгорает при нулевом балансе) любая картинка проходила как фото, и скриншот
+ * прайса застройщика становился публичной обложкой.
+ */
+const DOC_LIKE_NAME =
+  /(chanote|чанот|title[-_\s]?deed|deed|nor[-_\s]?sor|price[-_\s]?list|pricelist|прайс|commission|комисси|contract|договор|расчёт|расчет|invoice|passport|паспорт|scan|скан|документ|survey|межев)/i;
+
+export function looksLikeDocumentName(url: string): boolean {
+  try {
+    return DOC_LIKE_NAME.test(decodeURIComponent(new URL(url).pathname));
+  } catch {
+    return DOC_LIKE_NAME.test(url);
+  }
+}
+
 export async function partitionByVetting(
   urls: string[],
 ): Promise<{ accepted: string[]; rejected: VetVerdict[]; verdicts: VetVerdict[] }> {
@@ -166,8 +183,14 @@ export async function partitionByVetting(
   const accepted: string[] = [];
   const rejected: VetVerdict[] = [];
   for (const v of verdicts) {
-    if (isBlockingDocument(v)) rejected.push(v);
-    else accepted.push(v.url);
+    // Имя файла проверяем ВСЕГДА — даже когда вижн-гейт выключен или упал.
+    if (isBlockingDocument(v) || looksLikeDocumentName(v.url)) {
+      rejected.push(
+        v.checked ? v : { ...v, isDocument: true, reason: "имя файла выглядит как документ/прайс" },
+      );
+    } else {
+      accepted.push(v.url);
+    }
   }
   return { accepted, rejected, verdicts };
 }
