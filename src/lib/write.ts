@@ -219,7 +219,16 @@ export function parseArea(areaText?: string): { sqm?: number; rai?: number } {
   // Отрицательная площадь — это опечатка, а не значение. Отклоняем ВЕСЬ ввод, а
   // не отдельный матч: `(?<!-)` лишь сдвигал старт поиска вправо, и «-12 rai»
   // превращалось в 2 rai, «-800 m2» — в 0. Минус любой формы, включая юникодный.
-  if (/[-−–—]\s*\d/.test(s)) return {};
+  // Тайская запись «рай-нган-ва» («1-2-30 rai») и диапазоны («3-5 rai») содержат
+  // дефис как разделитель, а не знак минуса. Отклоняем только НАСТОЯЩИЙ минус:
+  // в начале строки или после пробела/двоеточия, но не между цифрами.
+  if (/(?:^|[\s:(])[-−–—]\s*\d/.test(s)) return {};
+  // «1-2-30 rai» → рай-нган-ва (1 rai 2 ngan 30 wah).
+  const thai = s.match(/(?<![\d.-])(\d{1,3})-(\d)-(\d{1,3})\s*(?:rai|ไร่)/i);
+  if (thai) {
+    const raiT = Number(thai[1]) + Number(thai[2]) * 0.25 + Number(thai[3]) * 0.0025;
+    return { sqm: Math.round(raiT * 1600), rai: Math.round(raiT * 100) / 100 };
+  }
   const mRai = s.match(/(\d+(?:[.,]\d+)?)\s*rai\b/i);
   const mNgan = s.match(/(\d+(?:[.,]\d+)?)\s*ngan\b/i);
   const mWah = s.match(/(\d+(?:[.,]\d+)?)\s*sq\.?\s*wah\b/i);
