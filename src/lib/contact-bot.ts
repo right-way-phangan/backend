@@ -38,6 +38,11 @@ const GREETING =
   "Привет! Напишите ваш вопрос по земле, виллам и домам на Пангане — ответит " +
   "живой человек. Можно сразу указать бюджет, район или ссылку на объект.";
 
+/** Пересылка владельцу не удалась — обещать ответ здесь нельзя, даём запасной канал. */
+const UNDELIVERED_ACK =
+  "Извините, сообщение не отправилось. Напишите, пожалуйста, на WhatsApp +66 84 362 7784.\n\n" +
+  "Sorry, your message didn't go through. Please reach us on WhatsApp +66 84 362 7784.";
+
 const CLIENT_ACK =
   "Спасибо! Сообщение получено — ответим здесь же.\n\n" +
   "Thanks! We've got your message and will reply right here.";
@@ -301,6 +306,7 @@ export async function handleContactUpdate(
     `От: ${escMd(fullName(msg.from))} (${escMd(uname)}, id \`${msg.from.id}\`)${firstContact ? " · 🆕 лид заведён" : ""}\n` +
     `↩️ Ответь reply на это или следующее сообщение.`;
 
+  let delivered = true;
   try {
     // Map BOTH the header and the copied message → this client, so the owner's
     // reply routes back whether they reply to the header or to the content.
@@ -322,7 +328,11 @@ export async function handleContactUpdate(
       ])
       .onConflictDoNothing();
   } catch (err) {
+    // Клиенту нельзя отвечать «получено», когда сообщение никуда не ушло: он
+    // уходит с сайта уверенным, что его ждут, а лида нет вообще. Ровно эта
+    // дыра была найдена в bot/contact_bot.py, но боевой путь — здесь.
     console.error("[contact-bot] forward to owner failed:", (err as Error).message);
+    delivered = false;
   }
 
   // AI concierge (Grok): reply with dialogue memory, but only until a human
@@ -369,10 +379,20 @@ export async function handleContactUpdate(
     }).catch(() => {});
   }
 
+  // Ответ ассистента — самостоятельная ценность для клиента и уходит всегда;
+  // а вот «сообщение получено» обещает передачу человеку, поэтому при провале
+  // пересылки заменяется запасным каналом связи.
+  const clientText = ai
+    ? ai.reply
+    : delivered
+      ? firstContact
+        ? GREETING
+        : CLIENT_ACK
+      : UNDELIVERED_ACK;
   await tg(cfg, "sendMessage", {
     chat_id: msg.chat.id,
-    text: ai ? ai.reply : firstContact ? GREETING : CLIENT_ACK,
-    parse_mode: !ai && firstContact ? "Markdown" : undefined,
+    text: clientText,
+    parse_mode: !ai && firstContact && delivered ? "Markdown" : undefined,
     disable_web_page_preview: true,
   }).catch(() => {});
 }

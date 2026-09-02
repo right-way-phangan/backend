@@ -3553,6 +3553,7 @@ var SITE2 = "https://rightwaygroup.co";
 var FLOOD_WINDOW_MS = 6e4;
 var FLOOD_MAX = 16;
 var GREETING = "\u{1F334} *Right Way Phangan*\n\nHi! Send your question about land, villas or houses on Koh Phangan \u2014 a real person will reply here. Feel free to share your budget, area or a listing link.\n\n\u041F\u0440\u0438\u0432\u0435\u0442! \u041D\u0430\u043F\u0438\u0448\u0438\u0442\u0435 \u0432\u0430\u0448 \u0432\u043E\u043F\u0440\u043E\u0441 \u043F\u043E \u0437\u0435\u043C\u043B\u0435, \u0432\u0438\u043B\u043B\u0430\u043C \u0438 \u0434\u043E\u043C\u0430\u043C \u043D\u0430 \u041F\u0430\u043D\u0433\u0430\u043D\u0435 \u2014 \u043E\u0442\u0432\u0435\u0442\u0438\u0442 \u0436\u0438\u0432\u043E\u0439 \u0447\u0435\u043B\u043E\u0432\u0435\u043A. \u041C\u043E\u0436\u043D\u043E \u0441\u0440\u0430\u0437\u0443 \u0443\u043A\u0430\u0437\u0430\u0442\u044C \u0431\u044E\u0434\u0436\u0435\u0442, \u0440\u0430\u0439\u043E\u043D \u0438\u043B\u0438 \u0441\u0441\u044B\u043B\u043A\u0443 \u043D\u0430 \u043E\u0431\u044A\u0435\u043A\u0442.";
+var UNDELIVERED_ACK = "\u0418\u0437\u0432\u0438\u043D\u0438\u0442\u0435, \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u043D\u0435 \u043E\u0442\u043F\u0440\u0430\u0432\u0438\u043B\u043E\u0441\u044C. \u041D\u0430\u043F\u0438\u0448\u0438\u0442\u0435, \u043F\u043E\u0436\u0430\u043B\u0443\u0439\u0441\u0442\u0430, \u043D\u0430 WhatsApp +66 84 362 7784.\n\nSorry, your message didn't go through. Please reach us on WhatsApp +66 84 362 7784.";
 var CLIENT_ACK = "\u0421\u043F\u0430\u0441\u0438\u0431\u043E! \u0421\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u043E \u2014 \u043E\u0442\u0432\u0435\u0442\u0438\u043C \u0437\u0434\u0435\u0441\u044C \u0436\u0435.\n\nThanks! We've got your message and will reply right here.";
 var AI_ENABLED = !!process.env.GROK_API_KEY && process.env.CONTACT_AI_ENABLED !== "0";
 var GROK_API_BASE = (process.env.GROK_API_BASE || "https://api.x.ai/v1").replace(/\/$/, "");
@@ -3706,6 +3707,7 @@ async function handleContactUpdate(db2, update, cfg) {
   const header = `\u{1F4E9} *\u041D\u043E\u0432\u044B\u0439 \u043A\u043E\u043D\u0442\u0430\u043A\u0442 \u0441 \u0441\u0430\u0439\u0442\u0430*
 \u041E\u0442: ${escMd(fullName(msg.from))} (${escMd(uname)}, id \`${msg.from.id}\`)${firstContact ? " \xB7 \u{1F195} \u043B\u0438\u0434 \u0437\u0430\u0432\u0435\u0434\u0451\u043D" : ""}
 \u21A9\uFE0F \u041E\u0442\u0432\u0435\u0442\u044C reply \u043D\u0430 \u044D\u0442\u043E \u0438\u043B\u0438 \u0441\u043B\u0435\u0434\u0443\u044E\u0449\u0435\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435.`;
+  let delivered = true;
   try {
     const head = await tg(cfg, "sendMessage", {
       chat_id: cfg.ownerId,
@@ -3723,6 +3725,7 @@ async function handleContactUpdate(db2, update, cfg) {
     ]).onConflictDoNothing();
   } catch (err) {
     console.error("[contact-bot] forward to owner failed:", err.message);
+    delivered = false;
   }
   let ai = null;
   if (AI_ENABLED && text2) {
@@ -3753,10 +3756,11 @@ ${ai.reply}`
     }).catch(() => {
     });
   }
+  const clientText = ai ? ai.reply : delivered ? firstContact ? GREETING : CLIENT_ACK : UNDELIVERED_ACK;
   await tg(cfg, "sendMessage", {
     chat_id: msg.chat.id,
-    text: ai ? ai.reply : firstContact ? GREETING : CLIENT_ACK,
-    parse_mode: !ai && firstContact ? "Markdown" : void 0,
+    text: clientText,
+    parse_mode: !ai && firstContact && delivered ? "Markdown" : void 0,
     disable_web_page_preview: true
   }).catch(() => {
   });
