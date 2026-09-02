@@ -69,7 +69,7 @@ test("АТАКА 1: телефон и комиссия из description не д�
   assert.ok(o, "объект должен быть в публичной выдаче");
 
   // Комиссия из отдельного поля вырезана, как и раньше…
-  assert.equal((o as Record<string, unknown>).outreachNote, undefined);
+  assert.equal((o as unknown as Record<string, unknown>).outreachNote, undefined);
 
   // …и тот же секрет, введённый свободным текстом, наружу больше не уходит.
   const desc = o!.descriptionRaw ?? "";

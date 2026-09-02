@@ -81,8 +81,11 @@ test("АТАКА 17a: базовый снапшот знает обо всех �
   const inSnap = new Set(Object.keys(snap.tables).map((k) => k.replace(/^public\./, "")));
 
   const declared = Object.values(schema)
-    .filter((v): v is Table => is(v, Table))
-    .map((t) => getTableName(t));
+    // `is(v, Table)` сужает к общему Table, а значения schema — конкретные
+    // PgTableWithColumns: предикат к ним не присваивается, поэтому фильтруем
+    // без сужения и приводим уже на использовании.
+    .filter((v) => is(v, Table))
+    .map((t) => getTableName(t as Table));
   const missing = declared.filter((t) => !inSnap.has(t));
   assert.deepEqual(missing, [], "таблицы schema.ts, которых нет в снапшоте");
 
