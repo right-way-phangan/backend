@@ -942,13 +942,67 @@ async function vetImageUrls(urls) {
 function isBlockingDocument(v) {
   return v.checked && v.isDocument && v.confidence !== "low";
 }
+var DOC_TOKENS = [
+  "chanote",
+  "\u0447\u0430\u043D\u043E\u0442[\u0430-\u044F\u0451]*",
+  "\u0442\u0438\u0442\u0443\u043B[\u0430-\u044F\u0451]*",
+  "deed",
+  "title[-_ ]?deed",
+  "nor[-_ ]?sor",
+  "ns3k?",
+  "price[-_ ]?list",
+  "pricelist",
+  "price[-_ ]?sheet",
+  "\u043F\u0440\u0430\u0439\u0441[\u0430-\u044F\u0451]*(?:[-_ ]?\u043B\u0438\u0441\u0442[\u0430-\u044F\u0451]*)?",
+  "commission",
+  "\u043A\u043E\u043C\u0438\u0441\u0441\u0438[\u0430-\u044F\u0451]*",
+  "komissiya",
+  "\u0446\u0435\u043D\u0430[-_ ]?\u0437\u0430[-_ ]?\u0440\u0430\u0439",
+  "price[-_ ]?per[-_ ]?rai",
+  "contract",
+  "\u0434\u043E\u0433\u043E\u0432\u043E\u0440[\u0430-\u044F\u0451]*",
+  "\u0440\u0430\u0441\u0447[\u0435\u0451]\u0442",
+  "invoice",
+  "receipt",
+  "passport",
+  "\u043F\u0430\u0441\u043F\u043E\u0440\u0442[\u0430-\u044F\u0451]*",
+  "scan",
+  "\u0441\u043A\u0430\u043D[\u0430-\u044F\u0451]*",
+  "\u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442[\u0430-\u044F\u0451]*",
+  "document",
+  // «survey» само по себе — это ещё и аэросъёмка участка (aerial-survey),
+  // законная обложка для земли по правилу медиа. Документом делает уточнение.
+  "land[-_ ]?survey",
+  "topo(?:graphic)?[-_ ]?survey",
+  "survey[-_ ]?plan",
+  "\u043C\u0435\u0436\u0435\u0432[\u0430-\u044F\u0451]*",
+  "\u043A\u0430\u0434\u0430\u0441\u0442\u0440[\u0430-\u044F\u0451]*",
+  "cadastr[a-z]*"
+];
+var DOC_LIKE_NAME = new RegExp(
+  `(?:^|[^a-z\u0430-\u044F\u0451])(?:${DOC_TOKENS.join("|")})(?:\\d*)(?:$|[^a-z\u0430-\u044F\u04510-9]|\\d)`,
+  "i"
+);
+function looksLikeDocumentName(url) {
+  try {
+    const u2 = new URL(url);
+    return DOC_LIKE_NAME.test(decodeURIComponent(u2.pathname + u2.search + u2.hash));
+  } catch {
+    return DOC_LIKE_NAME.test(url);
+  }
+}
 async function partitionByVetting(urls) {
   const verdicts = await vetImageUrls(urls);
   const accepted = [];
   const rejected = [];
   for (const v of verdicts) {
-    if (isBlockingDocument(v)) rejected.push(v);
-    else accepted.push(v.url);
+    if (isBlockingDocument(v) || looksLikeDocumentName(v.url)) {
+      rejected.push(
+        v.checked ? v : { ...v, isDocument: true, reason: "\u0438\u043C\u044F \u0444\u0430\u0439\u043B\u0430 \u0432\u044B\u0433\u043B\u044F\u0434\u0438\u0442 \u043A\u0430\u043A \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442/\u043F\u0440\u0430\u0439\u0441" }
+      );
+    } else {
+      accepted.push(v.url);
+    }
   }
   return { accepted, rejected, verdicts };
 }
@@ -1724,14 +1778,65 @@ var FEATURE_LABELS = [
   { key: "electricity", en: "\u26A1\uFE0F Electricity", ru: "\u26A1\uFE0F \u042D\u043B\u0435\u043A\u0442\u0440\u0438\u0447\u0435\u0441\u0442\u0432\u043E" }
 ];
 var CYRILLIC_RE = /[А-Яа-яЁё]/;
-var CONTACT_LINE_RE = /(\+?\d[\d\-\s().]{7,}\d)|line\s*id|line\s*:|whats\s*app|wa\.me|t\.me\/|telegram\s*[:@]|viber|\bimo\b|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|@[a-z0-9_]{4,}/i;
-var REDACT_DEED = /\b(chanote|чанот[а-я]*|title\s*deed)\b([^.,;)\n]{0,20}?)\b(?:no\.?|number|№|#|deed\s*no\.?|เลขที่)\s*#?\s*\d{3,}[/\d-]*/gi;
-var REDACT_COMMISSION = /\b(?:commission|комисси[яюейи])\b[\s:–-]*\d{0,2}(?:\.\d+)?\s*%?|(?:\d{1,2}(?:\.\d+)?\s*%)\s*(?:commission|комисс\w*)/gi;
+var CONTACT_PATTERNS = [
+  // Телефон: обязателен «+» ИЛИ 9+ цифр подряд. Без этого под правило попадала
+  // цена «8 500 000 THB» — три группы цифр через пробелы.
+  /\+\d[\d\-\s().]{6,18}\d/g,
+  /(?<![\d.,])\d{9,15}(?![\d.,])/g,
+  // Тайский мобильный в местной записи: 0XX XXX XXXX (10 цифр, ведущий ноль).
+  // Под «9+ цифр подряд» он не подпадает из-за пробелов, а под денежную
+  // эвристику не попадает, потому что суммы с нуля не начинаются.
+  /(?<![\d.,])0\d{1,2}[\s-]?\d{3}[\s-]?\d{4}(?![\d.,])/g,
+  // Явный телефонный контекст — любая последовательность цифр рядом со словом.
+  /\b(?:tel|phone|тел|телефон|моб|mobile|call)\b[.:\s]*\+?[\d\s().-]{7,20}\d/gi,
+  /[a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){1,4}/gi,
+  // Ник идёт СЛЕДОМ за названием мессенджера («LINE somchai88») — без хвоста
+  // вырезалось только слово, а сам контакт оставался.
+  // «line» — мессенджер только когда это ID: со словом id, с разделителем
+  // (`LINE: somchai88`) или сразу после названия. «power line runs along the
+  // road» — характеристика участка, и на пути ЗАПИСИ её вырезание необратимо.
+  /\b(?:whats\s*app|viber|imo|telegram|tg)\b\s*(?:id)?\s*[:#@-]?\s*[a-z0-9._-]{3,32}/gi,
+  /\bline\s*id\b\s*[:#@-]?\s*[a-z0-9._-]{3,32}/gi,
+  /\bline\s*[:#@]\s*[a-z0-9._-]{3,32}/gi,
+  /\bline\s+(?=[a-z0-9._-]{3,32}\b)(?!runs|along|to|from|is|are|at|on|near|and|or|of|the|goes|passes|available|nearby|connection|connected|access)[a-z0-9._-]{3,32}/gi,
+  /(?:wa\.me|t\.me)\/[a-z0-9_.+-]{1,40}/gi,
+  /@[a-z0-9_]{4,32}\b/gi
+];
+var MONEY_NEAR = /(?:thb|฿|บาท|usd|\$|eur|€|rub|₽|млн|млрд|million|m\b|k\b|бат)/i;
+var MAX_SCAN_CHARS = 2e4;
+var LETTER = "[a-z\u0430-\u044F\u0451]";
+var DEED_WORD = `(?<!${LETTER})(chanote|\u0447\u0430\u043D\u043E\u0442[\u0430-\u044F\u0451]*|\u0442\u0438\u0442\u0443\u043B[\u0430-\u044F\u0451]*|title\\s*deed|nor\\s*sor\\s*3(?:\\s*kor)?|ns3k?)(?!${LETTER})`;
+var DEED_INDICATOR = "(?:no\\.?|number|\u2116|#|deed\\s*no\\.?|\u0E40\u0E25\u0E02\u0E17\u0E35\u0E48)";
+var REDACT_DEED = new RegExp(
+  `${DEED_WORD}([^.,;)\\n]{0,20}?)${DEED_INDICATOR}\\s*#?\\s*\\d{3,}[/\\d-]*`,
+  "gi"
+);
+var COMMISSION_WORD = `(?<!${LETTER})(?:commissions?|\u043A\u043E\u043C\u0438\u0441\u0441\u0438[\u0430-\u044F\u0451]*)(?!${LETTER})`;
+var COMMISSION_GAP = "(?:[\\s:\u2013-]|of\\b|\u0432\\s+\u0440\u0430\u0437\u043C\u0435\u0440\u0435)*";
+var REDACT_COMMISSION = new RegExp(
+  `${COMMISSION_WORD}${COMMISSION_GAP}\\d{0,2}(?:\\.\\d+)?\\s*%?|(?:\\d{1,2}(?:\\.\\d+)?\\s*%)\\s*${COMMISSION_WORD}`,
+  "gi"
+);
 var REDACT_PRICELIST = /[^.\n]*(?:расчётн\w*\s+лист|developer'?s?\s+price\s*list|прайс[\s-]*лист\s+застройщ\w*)[^.\n]*/gi;
 var HARD_CONFIDENTIAL = [
-  { re: /\b(commission|комисси[яюейи])\b[\s:–-]*\d{1,2}(\.\d+)?\s*%/i, label: "\u043A\u043E\u043C\u0438\u0441\u0441\u0438\u044F" },
-  { re: /(\d{1,2}(\.\d+)?\s*%)\s*(commission|комисс)/i, label: "\u043A\u043E\u043C\u0438\u0441\u0441\u0438\u044F %" },
+  {
+    re: new RegExp(`${COMMISSION_WORD}${COMMISSION_GAP}\\d{1,2}(\\.\\d+)?\\s*%`, "i"),
+    label: "\u043A\u043E\u043C\u0438\u0441\u0441\u0438\u044F"
+  },
+  { re: new RegExp(`(\\d{1,2}(\\.\\d+)?\\s*%)\\s*${COMMISSION_WORD}`, "i"), label: "\u043A\u043E\u043C\u0438\u0441\u0441\u0438\u044F %" },
   { re: /\b(chanote|чанот[а-я]*|title\s*deed)\b[^.\n]{0,20}?\b(no\.?|number|№|#|deed\s*no\.?|เลขที่)\s*#?\s*\d{3,}/i, label: "\u043D\u043E\u043C\u0435\u0440 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430" },
+  // Голый номер без индикатора: «Chanote 13681». Отсекаем измерения — за
+  // площадью/градусами всегда идёт единица («Chanote: 1600 m²», «360 degrees»).
+  {
+    // Голый номер без индикатора («Chanote 13681»). Исключаем всё, что числом
+    // документа не является: площади, годы, деньги — иначе блокировались живые
+    // листинги вида «Chanote title deed, price 6500000 THB».
+    re: new RegExp(
+      `${DEED_WORD}[^.\\n]{0,20}?(?<![\\d,.])\\d{4,6}(?![\\d]|[.,]\\d)(?!\\s*(?:m\xB2|m2|sqm|sq\\.?\\s*m|square\\s*met|rai|ngan|wah|degrees|\xB0|\u0440\u0430\u0439|\u043D\u0433\u0430\u043D|\u0432\u0430|\u043C\xB2|\u043A\u0432|thb|\u0E3F|\u0E1A\u0E32\u0E17|usd|\\$|eur|rub|\u20BD|\u0431\u0430\u0442|\u0433\u043E\u0434|\u0433\\.|year))`,
+      "i"
+    ),
+    label: "\u043D\u043E\u043C\u0435\u0440 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 (\u0431\u0435\u0437 \u0438\u043D\u0434\u0438\u043A\u0430\u0442\u043E\u0440\u0430)"
+  },
   { re: /(расчётн\w*\s+лист|developer'?s?\s+price\s*list|прайс[\s-]*лист\s+застройщ)/i, label: "\u043F\u0440\u0430\u0439\u0441-\u043B\u0438\u0441\u0442 \u0437\u0430\u0441\u0442\u0440\u043E\u0439\u0449\u0438\u043A\u0430" }
 ];
 function fmtThb(n) {
@@ -1753,11 +1858,12 @@ function pickDescriptionSource(o, lang, warnings) {
   }
   return void 0;
 }
-function sanitizeDescription(raw, lang, warnings = []) {
-  if (!raw) return void 0;
-  let s = raw.replace("\u0421\u041E\u041E\u0411\u0429\u0415\u041D\u0418\u0415 \u041E\u0422 \u0421\u041E\u0411\u0421\u0422\u0412\u0415\u041D\u041D\u0418\u041A\u0410/\u0411\u0420\u041E\u041A\u0415\u0420\u0410:", "");
-  s = s.split("\u041E\u0422\u0412\u0415\u0422\u042B \u0418\u0417 \u041E\u041F\u0420\u041E\u0421\u0410:")[0];
-  s = s.replace(REDACT_DEED, (_m, kw) => {
+function redactConfidential(raw, warnings = []) {
+  if (raw.length > MAX_SCAN_CHARS) {
+    warnings.push(`\u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u043E\u0431\u0440\u0435\u0437\u0430\u043D\u043E \u0434\u043E ${MAX_SCAN_CHARS} \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432`);
+    raw = raw.slice(0, MAX_SCAN_CHARS);
+  }
+  let s = raw.replace(REDACT_DEED, (_m, kw) => {
     warnings.push("\u0438\u0437 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F \u0443\u0431\u0440\u0430\u043D \u043D\u043E\u043C\u0435\u0440 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 (\u0447\u0430\u043D\u043E\u0442)");
     return kw;
   });
@@ -1769,13 +1875,25 @@ function sanitizeDescription(raw, lang, warnings = []) {
     warnings.push("\u0438\u0437 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F \u0443\u0431\u0440\u0430\u043D\u043E \u0443\u043F\u043E\u043C\u0438\u043D\u0430\u043D\u0438\u0435 \u043F\u0440\u0430\u0439\u0441-\u043B\u0438\u0441\u0442\u0430 \u0437\u0430\u0441\u0442\u0440\u043E\u0439\u0449\u0438\u043A\u0430");
     return "";
   });
-  const kept = s.split(/\r?\n/).filter((ln) => {
-    if (CONTACT_LINE_RE.test(ln)) {
-      warnings.push("\u0438\u0437 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F \u0432\u044B\u0440\u0435\u0437\u0430\u043D\u0430 \u0441\u0442\u0440\u043E\u043A\u0430 \u0441 \u043A\u043E\u043D\u0442\u0430\u043A\u0442\u043E\u043C/\u0442\u0435\u043B\u0435\u0444\u043E\u043D\u043E\u043C");
-      return false;
+  return s.split(/\r?\n/).map((ln) => {
+    const moneyLine = MONEY_NEAR.test(ln);
+    let out = ln;
+    for (const re of CONTACT_PATTERNS) {
+      re.lastIndex = 0;
+      out = out.replace(re, (hit) => {
+        if (moneyLine && /^[\d\s.,-]+$/.test(hit)) return hit;
+        warnings.push("\u0438\u0437 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F \u0441\u043A\u0440\u044B\u0442 \u043A\u043E\u043D\u0442\u0430\u043A\u0442/\u0442\u0435\u043B\u0435\u0444\u043E\u043D");
+        return "";
+      });
     }
-    return true;
-  });
+    return out;
+  }).join("\n");
+}
+function sanitizeDescription(raw, lang, warnings = []) {
+  if (!raw) return void 0;
+  let s = raw.replace("\u0421\u041E\u041E\u0411\u0429\u0415\u041D\u0418\u0415 \u041E\u0422 \u0421\u041E\u0411\u0421\u0422\u0412\u0415\u041D\u041D\u0418\u041A\u0410/\u0411\u0420\u041E\u041A\u0415\u0420\u0410:", "");
+  s = s.split("\u041E\u0422\u0412\u0415\u0422\u042B \u0418\u0417 \u041E\u041F\u0420\u041E\u0421\u0410:")[0];
+  const kept = redactConfidential(s, warnings).split(/\r?\n/);
   s = kept.join("\n").replace(/\s+/g, " ").trim();
   if (lang === "en" && CYRILLIC_RE.test(s)) {
     warnings.push("\u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u0442 \u043A\u0438\u0440\u0438\u043B\u043B\u0438\u0446\u0443 \u2014 \u0443\u0431\u0440\u0430\u043D\u043E \u0438\u0437 EN-\u043F\u043E\u0441\u0442\u0430");
@@ -2146,6 +2264,8 @@ function contactRowValues(c, objectId, sort) {
   const hasContent = values.name || values.phone || values.line || values.whatsapp || values.telegram || values.note;
   return hasContent ? values : null;
 }
+var OBJECT_TYPES = ["Land", "Villa", "House", "Townhouse", "Apartment", "Project"];
+var OBJECT_STATUSES = ["Active", "Reserved", "Sold", "Withdrawn", "Draft"];
 function rwPrefixForType(type) {
   switch (type) {
     case "Land":
@@ -2193,9 +2313,18 @@ async function getNextUnitNumber(db2, parentRw) {
   }
   return `${projectRw}-${max + 1}`;
 }
+function positiveOrUndefined(n) {
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : void 0;
+}
 function parseArea(areaText) {
   if (!areaText) return {};
   const s = String(areaText);
+  if (/(?:^|[\s:(])[-−–—]\s*\d/.test(s)) return {};
+  const thai = s.match(/(?<![\d.-])(\d{1,3})-(\d)-(\d{1,3})\s*(?:rai|ไร่)/i);
+  if (thai) {
+    const raiT = Number(thai[1]) + Number(thai[2]) * 0.25 + Number(thai[3]) * 25e-4;
+    return { sqm: Math.round(raiT * 1600), rai: Math.round(raiT * 100) / 100 };
+  }
   const mRai = s.match(/(\d+(?:[.,]\d+)?)\s*rai\b/i);
   const mNgan = s.match(/(\d+(?:[.,]\d+)?)\s*ngan\b/i);
   const mWah = s.match(/(\d+(?:[.,]\d+)?)\s*sq\.?\s*wah\b/i);
@@ -2209,7 +2338,7 @@ function parseArea(areaText) {
   let raiF = f(mRai) + f(mNgan) * 0.25 + f(mWah) * 25e-4;
   if (raiF === 0 && sqm != null) raiF = sqm / 1600;
   if (sqm == null && raiF > 0) sqm = Math.round(raiF * 1600);
-  const rai = raiF >= 0.5 ? Math.max(1, Math.round(raiF)) : void 0;
+  const rai = raiF > 0 ? Math.round(raiF * 100) / 100 : void 0;
   return { sqm, rai };
 }
 function parseEscalation(text2) {
@@ -2250,6 +2379,24 @@ function parseLatLng(url) {
   if (lat < 9 || lat > 10.5 || lng < 99 || lng > 101) return {};
   return { lat, lng };
 }
+var MAP_HOSTS = /* @__PURE__ */ new Set([
+  "maps.app.goo.gl",
+  "goo.gl",
+  "maps.google.com",
+  "www.google.com",
+  "google.com",
+  "maps.apple.com",
+  "www.openstreetmap.org",
+  "openstreetmap.org",
+  "osm.org"
+]);
+function isMapHost(u2) {
+  try {
+    return MAP_HOSTS.has(new URL(u2).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
 async function resolveLatLngFromUrl(url) {
   if (!url) return {};
   const direct = parseLatLng(url);
@@ -2258,8 +2405,10 @@ async function resolveLatLngFromUrl(url) {
   try {
     let target = url;
     for (let i = 0; i < 5; i++) {
+      if (!isMapHost(target)) return {};
       const res = await fetch(target, {
         redirect: "manual",
+        signal: AbortSignal.timeout(5e3),
         headers: { "user-agent": "Mozilla/5.0 (compatible; RightWayBot/1.0)" }
       });
       const loc = res.headers.get("location");
@@ -2296,7 +2445,7 @@ function sanitizeConstructionUpdates(raw) {
     if (!u2 || typeof u2 !== "object") return [];
     const r = u2;
     const photos = (Array.isArray(r.photos) ? r.photos : []).map(str).filter((p) => /^https?:\/\//i.test(p));
-    if (photos.length === 0) return [];
+    if (photos.length === 0 && !str(r.date) && !str(r.note) && !str(r.noteRu)) return [];
     return [{
       date: str(r.date),
       dateRu: str(r.dateRu) || void 0,
@@ -2353,7 +2502,8 @@ function buildRow(input, rwNumber, title) {
   const isBuilding = ["Villa", "House", "Project"].includes(input.type);
   const descParts = [];
   if (input.description?.trim()) {
-    descParts.push("\u0421\u041E\u041E\u0411\u0429\u0415\u041D\u0418\u0415 \u041E\u0422 \u0421\u041E\u0411\u0421\u0422\u0412\u0415\u041D\u041D\u0418\u041A\u0410/\u0411\u0420\u041E\u041A\u0415\u0420\u0410:\n" + input.description.trim());
+    const safe = redactConfidential(input.description.trim()).trim();
+    if (safe) descParts.push("\u0421\u041E\u041E\u0411\u0429\u0415\u041D\u0418\u0415 \u041E\u0422 \u0421\u041E\u0411\u0421\u0422\u0412\u0415\u041D\u041D\u0418\u041A\u0410/\u0411\u0420\u041E\u041A\u0415\u0420\u0410:\n" + safe);
   }
   const row = {
     rwNumber,
@@ -2367,11 +2517,11 @@ function buildRow(input, rwNumber, title) {
     areaSqm: sqm,
     areaRai: input.type === "Land" ? rai : void 0,
     areaNote: input.area,
-    priceThb: input.priceThb,
-    pricePerRai: input.pricePerRai,
+    priceThb: positiveOrUndefined(input.priceThb),
+    pricePerRai: positiveOrUndefined(input.pricePerRai),
     rentPerRaiMonth: input.rentPerRaiMonth,
-    rentPerMonth: input.rentPerMonth,
-    leaseTermYears: input.leaseTermYears,
+    rentPerMonth: positiveOrUndefined(input.rentPerMonth),
+    leaseTermYears: positiveOrUndefined(input.leaseTermYears),
     leaseEscPercent: esc.percent,
     leaseEscPeriodYears: esc.periodYears,
     leaseEscNotes: esc.notes,
@@ -2383,8 +2533,8 @@ function buildRow(input, rwNumber, title) {
     waterType: input.waterType,
     internetType: input.internetType,
     terrain: input.type === "Land" ? input.terrain : void 0,
-    bedrooms: isBuilding ? input.bedrooms : void 0,
-    bathrooms: isBuilding ? input.bathrooms : void 0,
+    bedrooms: isBuilding ? positiveOrUndefined(input.bedrooms) : void 0,
+    bathrooms: isBuilding ? positiveOrUndefined(input.bathrooms) : void 0,
     buildYear: isBuilding ? input.buildYear : void 0,
     condition: isBuilding ? input.condition : void 0,
     stage: input.stage,
@@ -2410,7 +2560,7 @@ function buildRow(input, rwNumber, title) {
     // который уходит в публичный payload.
     outreachNote: input.commission ? `\u041A\u041E\u041C\u0418\u0421\u0421\u0418\u042F: ${input.commission}` : void 0,
     // Pre-composed block (bot) wins; otherwise compose from the message only.
-    descriptionRaw: input.descriptionRaw?.trim() || (descParts.length ? descParts.join("\n\n") : void 0),
+    descriptionRaw: (input.descriptionRaw?.trim() ? redactConfidential(input.descriptionRaw.trim()) : void 0) || (descParts.length ? descParts.join("\n\n") : void 0),
     dateAdded: String(Math.floor(Date.now() / 1e3))
   };
   for (const code of feat) {
@@ -2426,6 +2576,11 @@ function buildRow(input, rwNumber, title) {
   return row;
 }
 async function createObject(db2, input) {
+  if (!OBJECT_TYPES.includes(input.type)) {
+    throw new ObjectInputError(
+      `\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B\u0439 \u0442\u0438\u043F \u043E\u0431\u044A\u0435\u043A\u0442\u0430 \xAB${input.type}\xBB. \u0414\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u044B\u0435: ${OBJECT_TYPES.join(", ")}.`
+    );
+  }
   const rwNumber = input.parentProjectRw?.trim() ? await getNextUnitNumber(db2, input.parentProjectRw) : await getNextRwNumber(db2, input.type);
   const title = input.title?.trim() || await generateObjectTitle(titleAttrsFromInput(input, rwNumber));
   const row = buildRow(input, rwNumber, title);
@@ -2560,14 +2715,61 @@ var PAIR_KEYS = {
 };
 async function updateObject(db2, rwNumber, patch) {
   const set = { updatedAt: /* @__PURE__ */ new Date() };
+  const MONEY_FIELDS = /* @__PURE__ */ new Set([
+    "priceThb",
+    "pricePerRai",
+    "rentPerMonth",
+    "rentPerRaiMonth",
+    "leasePrepayment",
+    "leaseTermYears",
+    "bedrooms",
+    "bathrooms",
+    "unitsTotal",
+    "netYieldPct",
+    "areaRai",
+    "areaSqm"
+  ]);
+  const TEXT_FIELDS = /* @__PURE__ */ new Set(["descriptionRaw", "descriptionManualEn", "descriptionManualRu"]);
   for (const [k, v] of Object.entries(patch)) {
     if (!PATCHABLE.has(k)) continue;
+    if (MONEY_FIELDS.has(k)) {
+      set[k] = v == null ? null : positiveOrUndefined(v) ?? null;
+      continue;
+    }
+    if (TEXT_FIELDS.has(k)) {
+      set[k] = typeof v === "string" && v.trim() ? redactConfidential(v.trim()) : null;
+      continue;
+    }
+    if (k === "status") {
+      set[k] = OBJECT_STATUSES.includes(String(v)) ? v : void 0;
+      if (set[k] === void 0) delete set[k];
+      continue;
+    }
     if (k === "plotPolygon") {
-      set[k] = v == null ? null : sanitizePolygon(v) ?? null;
+      if (v == null) {
+        set[k] = null;
+        continue;
+      }
+      const poly = sanitizePolygon(v);
+      if (poly) set[k] = poly;
+      continue;
+    }
+    if ((k === "floorplanUrls" || k === "videoUrls") && Array.isArray(v)) {
+      set[k] = v;
       continue;
     }
     if (k === "floorplanUrls" || k === "videoUrls") {
       set[k] = typeof v === "string" ? parseUrls(v) ?? null : null;
+      continue;
+    }
+    if ((k === "priceStages" || k === "timeline" || k === "team") && Array.isArray(v)) {
+      set[k] = v;
+      continue;
+    }
+    if (k === "constructionUpdates" && Array.isArray(v)) {
+      const clean2 = sanitizeConstructionUpdates(v);
+      if (v.length === 0) set[k] = null;
+      else if (clean2 && clean2.length) set[k] = clean2;
       continue;
     }
     if (k === "priceStages" || k === "timeline" || k === "team") {
