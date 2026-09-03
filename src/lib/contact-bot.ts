@@ -21,6 +21,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { contactMessages, contactThreads, processedUpdates } from "../db/schema";
 import { createLead } from "./crm";
 import type { AnyPgDatabase } from "./load";
+import { checkRateLimit } from "./ratelimit";
 
 export interface ContactBotConfig {
   token: string;
@@ -54,6 +55,8 @@ const AI_ENABLED = !!process.env.GROK_API_KEY && process.env.CONTACT_AI_ENABLED 
 const GROK_API_BASE = (process.env.GROK_API_BASE || "https://api.x.ai/v1").replace(/\/$/, "");
 const GROK_MODEL = process.env.GROK_MODEL || "grok-3-mini";
 const HISTORY_LIMIT = 16; // last N stored turns fed back to the model (~8 exchanges)
+const AI_DAILY_PER_CHAT = 40; // Grok replies per chat per day — a real buyer never needs more
+const AI_DAILY_GLOBAL = 400; // site-wide daily ceiling on paid model calls
 
 type ChatTurn = { role: "user" | "assistant"; content: string };
 
@@ -355,7 +358,13 @@ export async function handleContactUpdate(
         .orderBy(desc(contactMessages.createdAt))
         .limit(HISTORY_LIMIT);
       const history = prior.reverse().map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-      ai = await grokReply(history, text);
+      // The per-minute flood guard above still allows ~480 paid Grok calls an
+      // hour from one chat, and any number of chats. Daily ceilings per chat
+      // and site-wide bound the bill; over the cap the bot degrades to the
+      // static ack (the owner still gets the forward).
+      const perChat = await checkRateLimit(db, `contact-ai:${msg.chat.id}`, AI_DAILY_PER_CHAT, 86_400);
+      const global = await checkRateLimit(db, "contact-ai:all", AI_DAILY_GLOBAL, 86_400);
+      ai = perChat.allowed && global.allowed ? await grokReply(history, text) : null;
       if (ai) {
         await db
           .insert(contactMessages)
