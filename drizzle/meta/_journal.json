@@ -232,6 +232,13 @@
       "when": 1788204610368,
       "tag": "0032_schema_sync",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1788498293820,
+      "tag": "0033_partners_referrals",
+      "breakpoints": true
     }
   ]
 }
