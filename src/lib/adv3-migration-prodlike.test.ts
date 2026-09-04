@@ -24,6 +24,12 @@ import { getTableName, is, Table } from "drizzle-orm";
 import * as schema from "../db/schema";
 
 const FOLDER = "./drizzle";
+// Число миграций и последний снапшот берём из журнала, а не пиним: каждая
+// новая миграция иначе ломала бы эти два теста (так и вышло с 0033).
+const JOURNAL = JSON.parse(readFileSync(join(FOLDER, "meta/_journal.json"), "utf8")) as {
+  entries: Array<{ idx: number; tag: string }>;
+};
+const snapshotOf = (offset: number) => `meta/${JOURNAL.entries.at(offset)!.tag.slice(0, 4)}_snapshot.json`;
 
 /** Имена колонок, объявленных в schema.ts, по таблицам. */
 function declaredColumns(): Map<string, Set<string>> {
@@ -80,7 +86,7 @@ test("АТАКА 70: migrate() поверх вручную применённы�
   const applied = await client.query<{ hash: string }>(
     "select hash from drizzle.__drizzle_migrations",
   );
-  assert.equal(applied.rows.length, 33);
+  assert.equal(applied.rows.length, JOURNAL.entries.length);
   await client.close();
 });
 
@@ -112,8 +118,8 @@ test("АТАКА 70a: после migrate() в базе есть все коло�
 // | ФАКТ: расхождений нет ни в одну сторону; цепочка prevId 0027 → 0032 цела,
 //   то есть генератор возьмёт именно этот снапшот за базу
 // | код: backend/drizzle/meta/0032_snapshot.json
-test("АТАКА 70b: снапшот 0032 совпадает со schema.ts по колонкам и держит цепочку prevId", () => {
-  const snap = JSON.parse(readFileSync(join(FOLDER, "meta/0032_snapshot.json"), "utf8")) as {
+test("АТАКА 70b: последний снапшот совпадает со schema.ts по колонкам и держит цепочку prevId", () => {
+  const snap = JSON.parse(readFileSync(join(FOLDER, snapshotOf(-1)), "utf8")) as {
     prevId: string;
     tables: Record<string, { columns: Record<string, unknown> }>;
   };
@@ -133,7 +139,7 @@ test("АТАКА 70b: снапшот 0032 совпадает со schema.ts по
   assert.deepEqual(missing, []);
   assert.deepEqual(extra, []);
 
-  const prev = JSON.parse(readFileSync(join(FOLDER, "meta/0027_snapshot.json"), "utf8")) as {
+  const prev = JSON.parse(readFileSync(join(FOLDER, snapshotOf(-2)), "utf8")) as {
     id: string;
   };
   assert.equal(snap.prevId, prev.id);
