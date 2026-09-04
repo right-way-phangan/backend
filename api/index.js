@@ -9,7 +9,7 @@ import { handle } from "hono/vercel";
 
 // src/api/app.ts
 import "dotenv/config";
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
@@ -3918,6 +3918,26 @@ async function listValuations(db2, limit = 20) {
   return db2.select().from(valuations).orderBy(desc7(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
 }
 
+// src/lib/token-scope.ts
+import { timingSafeEqual } from "node:crypto";
+var TRACK_PREFIXES = ["/track/"];
+var TRACK_EXACT = ["/ratelimit"];
+function isTrackPath(path) {
+  return TRACK_EXACT.includes(path) || TRACK_PREFIXES.some((p) => path.startsWith(p));
+}
+function safeEqual(got, want) {
+  const a = Buffer.from(got ?? "");
+  const b = Buffer.from(want);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+function tokenAllows(path, authorization, tokens) {
+  if (!authorization?.startsWith("Bearer ")) return false;
+  const presented = authorization.slice("Bearer ".length);
+  if (tokens.full && safeEqual(presented, tokens.full)) return true;
+  if (tokens.track && isTrackPath(path) && safeEqual(presented, tokens.track)) return true;
+  return false;
+}
+
 // src/api/app.ts
 var API_TOKEN = process.env.API_TOKEN;
 var ON_VERCEL = !!process.env.VERCEL;
@@ -3941,17 +3961,18 @@ if (!ON_VERCEL) {
   seedCrm(db).catch((e) => console.warn("[crm seed] skipped:", e.message));
 }
 var app = new Hono();
-function safeEqual(got, want) {
+function safeEqual2(got, want) {
   const a = Buffer.from(got ?? "");
   const b = Buffer.from(want);
-  return a.length === b.length && timingSafeEqual(a, b);
+  return a.length === b.length && timingSafeEqual2(a, b);
 }
 var CORS_ORIGINS = (process.env.CORS_ORIGINS ?? "https://rightwaygroup.co,https://www.rightwaygroup.co").split(",").map((s) => s.trim()).filter(Boolean);
 app.use("/*", cors({ origin: CORS_ORIGINS }));
 if (API_TOKEN) {
   app.use("/*", async (c, next) => {
     if (c.req.path === "/health" || c.req.path.startsWith("/telegram/")) return next();
-    if (!safeEqual(c.req.header("authorization"), `Bearer ${API_TOKEN}`)) {
+    const tokens = { full: API_TOKEN, track: process.env.API_TOKEN_TRACK };
+    if (!tokenAllows(c.req.path, c.req.header("authorization"), tokens)) {
       return c.json({ error: "unauthorized" }, 401);
     }
     return next();
@@ -3960,7 +3981,7 @@ if (API_TOKEN) {
 app.get("/health", (c) => c.json({ ok: true, driver }));
 app.post("/telegram/contact", async (c) => {
   if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
-  if (CONTACT_WEBHOOK_SECRET && !safeEqual(c.req.header("x-telegram-bot-api-secret-token"), CONTACT_WEBHOOK_SECRET)) {
+  if (CONTACT_WEBHOOK_SECRET && !safeEqual2(c.req.header("x-telegram-bot-api-secret-token"), CONTACT_WEBHOOK_SECRET)) {
     return c.json({ error: "forbidden" }, 403);
   }
   try {
@@ -3972,7 +3993,7 @@ app.post("/telegram/contact", async (c) => {
   return c.json({ ok: true });
 });
 app.get("/telegram/selfcheck", async (c) => {
-  if (CRON_SECRET && !safeEqual(c.req.header("authorization"), `Bearer ${CRON_SECRET}`)) {
+  if (CRON_SECRET && !safeEqual2(c.req.header("authorization"), `Bearer ${CRON_SECRET}`)) {
     return c.json({ error: "unauthorized" }, 401);
   }
   if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);

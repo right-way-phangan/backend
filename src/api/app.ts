@@ -60,6 +60,7 @@ import {
   logValuation, listValuations, ValuationInputError,
 } from "../lib/valuation";
 import { checkRateLimit } from "../lib/ratelimit";
+import { tokenAllows } from "../lib/token-scope";
 
 const API_TOKEN = process.env.API_TOKEN;
 const ON_VERCEL = !!process.env.VERCEL;
@@ -120,7 +121,11 @@ if (API_TOKEN) {
     // /health is public; the Telegram webhook authenticates via its own secret
     // header (Telegram can't send a Bearer token), validated in the route below.
     if (c.req.path === "/health" || c.req.path.startsWith("/telegram/")) return next();
-    if (!safeEqual(c.req.header("authorization"), `Bearer ${API_TOKEN}`)) {
+    // Полный токен открывает всё; API_TOKEN_TRACK (если задан) — только
+    // /track/* и /ratelimit, чтобы публичные beacon'ы сайта не держали секрет,
+    // которым можно удалить каталог.
+    const tokens = { full: API_TOKEN, track: process.env.API_TOKEN_TRACK };
+    if (!tokenAllows(c.req.path, c.req.header("authorization"), tokens)) {
       return c.json({ error: "unauthorized" }, 401);
     }
     return next();
