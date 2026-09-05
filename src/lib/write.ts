@@ -212,6 +212,22 @@ function positiveOrUndefined(n: unknown): number | undefined {
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/**
+ * Запятая в числе бывает и разделителем тысяч («1,234 m²» = 1234), и десятичной
+ * («1,5 m²» = 1.5). Различаем по длине хвоста: ровно три цифры и не последняя
+ * группа — тысячи, одна-две — дробь. Раньше запятая просто выбрасывалась, и
+ * «1,5 m²» превращалось в 15 м² — десятикратное завышение площади, от которой
+ * считается цена за рай.
+ */
+function normalizeDecimal(raw: string): string {
+  const compact = raw.replace(/\s/g, "");
+  // 1,234 / 1,234,567 — группы по три: разделитель тысяч
+  if (/^\d{1,3}(,\d{3})+$/.test(compact)) return compact.replace(/,/g, "");
+  // 1,5 / 12,75 — дробная часть
+  if (/^\d+,\d{1,2}$/.test(compact)) return compact.replace(",", ".");
+  return compact.replace(/,/g, "");
+}
+
 // ---- free-text parsers (port of object-writer.ts) ----
 export function parseArea(areaText?: string): { sqm?: number; rai?: number } {
   if (!areaText) return {};
@@ -239,7 +255,7 @@ export function parseArea(areaText?: string): { sqm?: number; rai?: number } {
     m ? parseFloat(m[1].replace(",", ".").replace(/\s/g, "")) : 0;
   let sqm: number | undefined;
   if (mSqm) {
-    const n = parseFloat(mSqm[1].replace(/[\s,]/g, ""));
+    const n = parseFloat(normalizeDecimal(mSqm[1]));
     sqm = Number.isFinite(n) ? Math.round(n) : undefined;
   }
   let raiF = f(mRai) + f(mNgan) * 0.25 + f(mWah) * 0.0025;
@@ -427,7 +443,7 @@ function titleAttrsFromInput(input: NewObjectInput, rwNumber: string): TitleAttr
     district: input.district,
     rai,
     bedrooms: input.bedrooms,
-    unitsTotal: input.unitsTotal,
+    unitsTotal: positiveOrUndefined(input.unitsTotal),
     documentType: input.documentType,
     beachfront: feat.has("BEACHFRONT"),
     seaView: feat.has("SEA_VIEW"),
@@ -476,14 +492,14 @@ function buildRow(input: NewObjectInput, rwNumber: string, title: string): Objec
 
     priceThb: positiveOrUndefined(input.priceThb),
     pricePerRai: positiveOrUndefined(input.pricePerRai),
-    rentPerRaiMonth: input.rentPerRaiMonth,
+    rentPerRaiMonth: positiveOrUndefined(input.rentPerRaiMonth),
     rentPerMonth: positiveOrUndefined(input.rentPerMonth),
     leaseTermYears: positiveOrUndefined(input.leaseTermYears),
     leaseEscPercent: esc.percent,
     leaseEscPeriodYears: esc.periodYears,
     leaseEscNotes: esc.notes,
     leaseAdditionalTerms: input.leaseAddTerms,
-    leasePrepayment: input.leasePrepayment,
+    leasePrepayment: positiveOrUndefined(input.leasePrepayment),
     buildingRules: input.buildingRules,
     ownerName: input.owner,
 
@@ -494,7 +510,7 @@ function buildRow(input: NewObjectInput, rwNumber: string, title: string): Objec
 
     bedrooms: isBuilding ? positiveOrUndefined(input.bedrooms) : undefined,
     bathrooms: isBuilding ? positiveOrUndefined(input.bathrooms) : undefined,
-    buildYear: isBuilding ? input.buildYear : undefined,
+    buildYear: isBuilding ? positiveOrUndefined(input.buildYear) : undefined,
     condition: isBuilding ? input.condition : undefined,
 
     stage: input.stage,
@@ -502,10 +518,10 @@ function buildRow(input: NewObjectInput, rwNumber: string, title: string): Objec
     developer: input.developer,
     completion: input.completion,
     paymentTerms: input.paymentTerms,
-    netYieldPct: input.netYieldPct,
+    netYieldPct: positiveOrUndefined(input.netYieldPct),
     estNetIncomeYear: input.estNetIncomeYear,
-    unitsTotal: input.unitsTotal,
-    unitsAvailable: input.unitsAvailable,
+    unitsTotal: positiveOrUndefined(input.unitsTotal),
+    unitsAvailable: positiveOrUndefined(input.unitsAvailable),
 
     videoUrls: parseUrls(input.videoUrls),
     floorplanUrls: parseUrls(input.floorplanUrls),
@@ -665,7 +681,7 @@ const PATCHABLE = new Set<keyof ObjectInsert>([
   "status", "priceThb", "pricePerRai", "rentPerRaiMonth", "rentPerMonth", "leaseTermYears",
   "district", "documentType", "tenure", "descriptionRaw", "areaNote", "locationUrl",
   "descriptionManualEn", "descriptionManualRu", // deliberate manual description override (admin)
-  "developer", "completion", "unitsAvailable", "titleEn", "driveFolder",
+  "developer", "completion", "unitsAvailable", "unitsTotal", "netYieldPct", "titleEn", "driveFolder",
   // площадь — для дозаполнения каталога (детектор полноты /admin/valuation)
   "areaRai", "areaSqm",
   // bot /edit fields
@@ -715,7 +731,10 @@ export async function updateObject(
   const MONEY_FIELDS = new Set([
     "priceThb", "pricePerRai", "rentPerMonth", "rentPerRaiMonth",
     "leasePrepayment", "leaseTermYears", "bedrooms", "bathrooms",
-    "unitsTotal", "netYieldPct", "areaRai", "areaSqm",
+    "unitsTotal", "unitsAvailable", "buildYear", "netYieldPct", "areaRai", "areaSqm",
+    // внутренние счётчики обзвона: наружу не уходят, но отрицательные значения
+    // ломают сортировку и отчёт /admin/outreach
+    "timeOnMarketMonths", "outreachAttempts",
   ]);
   const TEXT_FIELDS = new Set(["descriptionRaw", "descriptionManualEn", "descriptionManualRu"]);
   for (const [k, v] of Object.entries(patch)) {

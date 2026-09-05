@@ -4,13 +4,19 @@
  * Второй цикл ввёл LETTER/DEED_WORD/DEED_INDICATOR (кириллица «ожила») и правило
  * «голого номера» с исключениями под площади/деньги/годы/градусы. В результате:
  *  - появился НОВЫЙ класс ложных блокировок — год постройки/выдачи после слова
- *    chanote/title deed валит публикацию объекта целиком;
+ *    chanote/title deed валил публикацию объекта целиком;
  *  - блокировка «номер документа» (HARD_CONFIDENTIAL[2]) осталась ASCII-`\b`
  *    и для кириллицы по-прежнему недостижима — её лишь маскирует правило
  *    «голого номера», работающее только на 4-6 цифрах;
  *  - тривиальные обходы (омоглиф, разрядка) не закрыты ни одним правилом.
  *
- * Тесты ЗЕЛЁНЫЕ и характеризующие.
+ * ИСПРАВЛЕНО 2026-09-05 (АТАКА 56): добавлен `NOT_AFTER_CONTEXT` — просмотр
+ * НАЗАД на слово-маркер перед числом. «Chanote issued in 2019» публикуется.
+ * АТАКА 56a ИСПРАВЛЕНА 2026-09-05: ASCII-`\b` внутри просмотра делал всю
+ * кириллическую половину списка маркеров недостижимой — асимметрия EN/RU не
+ * ушла, а перевернулась. Заменён на просмотр по буквам, как в DEED_WORD.
+ * Это был четвёртый случай одной и той же ошибки: в JS `\b` и `\w` считаются
+ * по ASCII и на границе с кириллицей не срабатывают.
  *   npx tsx --test src/lib/adv3-*.test.ts
  */
 import { test } from "node:test";
@@ -51,36 +57,62 @@ const OBJ = {
   descriptionManualEn: "Nice villa.",
 } as unknown as RealEstateObject;
 
-// АТАКА 56 [HIGH]: год рядом со словом «chanote» блокирует публикацию объекта
-// | ОЖИДАЕТСЯ: «Chanote issued in 2019» / «built 2019» — это год, а не номер
-//   документа; объект публикуется
-// | ФАКТ: правило «голого номера» исключает год только когда маркер стоит ПОСЛЕ
-//   числа («2019 год», «2019 year»). Английская запись «issued in 2019» ставит
-//   маркер ПЕРЕД числом, исключение не срабатывает, и весь объект уходит в
-//   ok:false — молча пропадает из канала публикации
-// | код: backend/src/lib/publishable.ts:213-217
-test("АТАКА 56: «Chanote issued in 2019» валит публикацию объекта целиком", () => {
-  assert.equal(blocked("Chanote issued in 2019"), true);
-  assert.equal(blocked("Villa with chanote, built 2019"), true);
-  assert.equal(blocked("Title deed 2018 renovation"), true);
+// АТАКА 56 [HIGH]: год рядом со словом «chanote» больше не блокирует объект
+// | ИНВАРИАНТ: «Chanote issued in 2019» / «built 2019» — это год, а не номер
+//   документа; объект публикуется. Маркер года читается и слева от числа
+// | код: backend/src/lib/publishable.ts:198-200 (NOT_AFTER_CONTEXT), :234-242
+test("АТАКА 56: «Chanote issued in 2019» не валит публикацию объекта", () => {
+  assert.equal(blocked("Chanote issued in 2019"), false);
+  assert.equal(blocked("Villa with chanote, built 2019"), false);
+  assert.equal(blocked("Chanote registered 2021"), false);
 
   const res = toPublishable({ ...OBJ, titleEn: "Chanote issued in 2019" }, { channel: "telegram" });
-  assert.equal(res.ok, false);
+  assert.equal(res.ok, true);
+
+  // контроль fail-closed: без слова-маркера слева число рядом с DEED_WORD
+  // по-прежнему считается номером документа
+  assert.equal(blocked("Chanote 2019"), true);
+  assert.equal(blocked("Chanote 13681"), true);
+  const bare = toPublishable({ ...OBJ, titleEn: "Chanote 13681" }, { channel: "telegram" });
+  assert.equal(bare.ok, false);
   assert.deepEqual(
-    (res as { reasons: string[] }).reasons,
+    (bare as { reasons: string[] }).reasons,
     ["в публикуемом тексте обнаружено конфиденциальное (номер документа (без индикатора))"],
   );
+
+  // ОСТАЁТСЯ ХАРАКТЕРИЗУЮЩИМ: «Title deed 2018 renovation» — год без маркера
+  // слева и без «year» справа. Отличить его от номера документа правилу нечем
+  assert.equal(blocked("Title deed 2018 renovation"), true);
 });
 
-// АТАКА 56a [HIGH]: асимметрия EN/RU — русская формулировка того же факта проходит
-// | ОЖИДАЕТСЯ: одинаковое поведение на обоих языках (правило двуязычия)
-// | ФАКТ: «Чанот выдан в 2019 году» проходит (после числа стоит «году» →
-//   исключение), «Chanote issued in 2019» блокируется. Один и тот же объект
-//   публикуется в RU-канале и молча не публикуется в EN
-// | код: backend/src/lib/publishable.ts:213-217
-test("АТАКА 56a: RU-версия «Чанот выдан в 2019 году» публикуется, EN — нет", () => {
+// АТАКА 56a [HIGH]: асимметрия EN/RU в маркерах контекста
+// | ОЖИДАЛОСЬ: одинаковое поведение на обоих языках (правило двуязычия)
+// | БЫЛО: NOT_AFTER_CONTEXT начинался с `(?<!\b(?:issued|…|выдан|…|участок)\s)`,
+//   а `\b` в JS — ASCII-only: перед кириллической буквой после пробела границы
+//   слова нет, поэтому вся кириллическая половина списка была недостижима.
+//   EN-форма «Chanote issued in 2019» проходила, RU-форма «Чанот выдан 2019» —
+//   блокировалась; спасал только маркер СПРАВА («2019 году»)
+// | ИСПРАВЛЕНО 2026-09-05: просмотр по буквам + словоформы `выдан[а-яё]{0,3}`
+// | код: backend/src/lib/publishable.ts:198-200
+test("АТАКА 56a: маркеры контекста работают одинаково на EN и RU", () => {
+  // EN — маркер слева работает
+  assert.equal(blocked("Chanote issued in 2019"), false);
+  assert.equal(blocked("Chanote sold in 2018"), false);
+  assert.equal(blocked("Chanote land plot 2400"), false);
+
+  // RU — те же маркеры слева работают ровно так же
+  assert.equal(blocked("Чанот выдан 2019"), false);
+  assert.equal(blocked("Чанот продан в 2018"), false);
+  assert.equal(blocked("Чанот участок 2400"), false);
+  assert.equal(blocked("Чанот зарегистрирован 2019"), false);
+  assert.equal(blocked("Чанот выдана 2019"), false); // словоформа
+
+  // маркер справа продолжает работать
   assert.equal(blocked("Чанот выдан в 2019 году"), false);
-  assert.equal(blocked("Chanote issued in 2019"), true);
+
+  // контроль fail-closed: настоящий номер блокируется на обоих языках
+  assert.equal(blocked("Chanote 13681"), true);
+  assert.equal(blocked("Чанот 13681"), true);
 });
 
 // АТАКА 57 [HIGH]: кириллический номер документа с индикатором утекает в тайтле

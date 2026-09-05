@@ -13,7 +13,12 @@
  * `OBJECT_STATUSES` для status (значение вне списка не пишется вовсе) и вызов
  * sanitizeConstructionUpdates для массива.
  *
- * Тесты стерегут фикс; 21a/23a/24 остаются ХАРАКТЕРИЗУЮЩИМИ — см. комментарии.
+ * ИСПРАВЛЕНО 2026-09-05 (21a): числовые поля на СОЗДАНИИ доведены до того же
+ * правила — `positiveOrUndefined` теперь стоит на unitsTotal, unitsAvailable,
+ * rentPerRaiMonth, leasePrepayment, buildYear, netYieldPct; в MONEY_FIELDS
+ * PATCH дописаны пропущенные unitsAvailable и buildYear.
+ *
+ * Тесты стерегут фикс; 23a/24 остаются ХАРАКТЕРИЗУЮЩИМИ — см. комментарии.
  *   npx tsx --test src/lib/adv2-*.test.ts
  */
 import { test, before, after } from "node:test";
@@ -76,14 +81,14 @@ test("АТАКА 21: PATCH не пишет отрицательную цену",
   assert.equal((await rowOf(rwNumber)).priceThb, null);
 });
 
-// АТАКА 21a [HIGH]: НЕ ЗАКРЫТО — на СОЗДАНИИ проверку прошли не все поля
-// | ОЖИДАЕТСЯ: все денежные/счётные поля проверяются одинаково на обоих путях
-// | ФАКТ: createObject по-прежнему пишет отрицательные rentPerRaiMonth,
-//   leasePrepayment, unitsTotal, netYieldPct (rentPerRaiMonth — цена аренды
-//   земли, витрина /leasehold). На PATCH первые два уже прикрыты MONEY_FIELDS,
-//   а unitsAvailable/buildYear в MONEY_FIELDS не попали и пишутся сырыми
-// | код: backend/src/lib/write.ts:706-710 (MONEY_FIELDS) и createObject
-test("АТАКА 21a: отрицательные rentPerRaiMonth/leasePrepayment проходят на создании", async () => {
+// АТАКА 21a [HIGH]: положительность проверяется на СОЗДАНИИ теми же полями,
+// что и на PATCH — списки сошлись
+// | ИНВАРИАНТ: rentPerRaiMonth (цена аренды земли, витрина /leasehold),
+//   leasePrepayment, unitsTotal, netYieldPct, unitsAvailable, buildYear не
+//   попадают в базу отрицательными ни через createObject, ни через PATCH;
+//   положительные значения пишутся как раньше
+// | код: backend/src/lib/write.ts:493-524 (createObject), :731-735 (MONEY_FIELDS)
+test("АТАКА 21a: отрицательные rentPerRaiMonth/leasePrepayment не проходят на создании", async () => {
   const { rwNumber } = await createObject(db, {
     type: "Land",
     district: "Sri Thanu",
@@ -93,23 +98,52 @@ test("АТАКА 21a: отрицательные rentPerRaiMonth/leasePrepayment
     netYieldPct: -12,
   });
   const row = await rowOf(rwNumber);
-  assert.equal(row.rentPerRaiMonth, -25_000);
-  assert.equal(row.leasePrepayment, -1_000_000);
-  assert.equal(row.unitsTotal, -5);
-  assert.equal(row.netYieldPct, -12);
+  assert.equal(row.rentPerRaiMonth, null);
+  assert.equal(row.leasePrepayment, null);
+  assert.equal(row.unitsTotal, null);
+  assert.equal(row.netYieldPct, null);
 
-  // PATCH те же два поля уже отбивает
+  // PATCH те же поля отбивает так же
   await updateObject(db, rwNumber, { rentPerRaiMonth: -25_000, leasePrepayment: -1_000_000 });
   const patched = await rowOf(rwNumber);
   assert.equal(patched.rentPerRaiMonth, null);
   assert.equal(patched.leasePrepayment, null);
 
-  // ...а unitsAvailable/buildYear на PATCH всё ещё без проверки
-  const unit = await createObject(db, { type: "Project", district: "Ban Tai" });
+  // unitsAvailable/buildYear закрыты на обоих путях
+  const unit = await createObject(db, {
+    type: "Project",
+    district: "Ban Tai",
+    unitsAvailable: -5,
+    buildYear: -1,
+  });
+  const created = await rowOf(unit.rwNumber);
+  assert.equal(created.unitsAvailable, null);
+  assert.equal(created.buildYear, null);
+
   await updateObject(db, unit.rwNumber, { unitsAvailable: -5, buildYear: -1 });
   const u = await rowOf(unit.rwNumber);
-  assert.equal(u.unitsAvailable, -5);
-  assert.equal(u.buildYear, -1);
+  assert.equal(u.unitsAvailable, null);
+  assert.equal(u.buildYear, null);
+
+  // контроль: положительные значения по-прежнему пишутся на обоих путях
+  const ok = await createObject(db, {
+    type: "Land",
+    district: "Sri Thanu",
+    rentPerRaiMonth: 25_000,
+    leasePrepayment: 1_000_000,
+    unitsTotal: 5,
+    netYieldPct: 12,
+  });
+  const okRow = await rowOf(ok.rwNumber);
+  assert.equal(okRow.rentPerRaiMonth, 25_000);
+  assert.equal(okRow.leasePrepayment, 1_000_000);
+  assert.equal(okRow.unitsTotal, 5);
+  assert.equal(okRow.netYieldPct, 12);
+
+  await updateObject(db, unit.rwNumber, { unitsAvailable: 7, buildYear: 2019 });
+  const uOk = await rowOf(unit.rwNumber);
+  assert.equal(uOk.unitsAvailable, 7);
+  assert.equal(uOk.buildYear, 2019);
 });
 
 // АТАКА 22 [CRITICAL]: redactConfidential стоит и на PATCH

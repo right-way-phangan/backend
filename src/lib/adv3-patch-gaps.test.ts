@@ -9,6 +9,11 @@
  * ради починки молчаливого стирания, кладёт в jsonb непроверенное содержимое —
  * ровно то, от чего в соседней ветке (constructionUpdates) защищаются явно.
  *
+ * ИСПРАВЛЕНО 2026-09-05 (АТАКА 62, наполовину): в MONEY_FIELDS дописаны
+ * unitsAvailable и buildYear. timeOnMarketMonths и outreachAttempts в списки
+ * так и не попали, а мёртвые записи MONEY_FIELDS (unitsTotal, netYieldPct)
+ * остались — 62 и 62a продолжают это стеречь.
+ *
  * Тесты ЗЕЛЁНЫЕ и характеризующие.
  *   npx tsx --test src/lib/adv3-*.test.ts
  */
@@ -43,14 +48,16 @@ after(async () => {
   await client.close();
 });
 
-// АТАКА 62 [HIGH]: числовые поля мимо MONEY_FIELDS пишутся без проверки знака
-// | ОЖИДАЕТСЯ: то же правило, что для цены — отрицательное количество юнитов,
-//   год постройки и время на рынке в базу не попадают
-// | ФАКТ: unitsAvailable / buildYear / timeOnMarketMonths / outreachAttempts
-//   патчатся (они в PATCHABLE), но в MONEY_FIELDS их нет — значение уезжает в
-//   колонку как есть. «−7 юнитов свободно» и «год постройки −3000» публичны
-// | код: backend/src/lib/write.ts:706-710 (MONEY_FIELDS) vs 655-687 (PATCHABLE)
-test("АТАКА 62: PATCH пишет отрицательные unitsAvailable / buildYear", async () => {
+// АТАКА 62 [HIGH]: ЗАКРЫТО НАПОЛОВИНУ — unitsAvailable/buildYear прикрыты,
+// timeOnMarketMonths/outreachAttempts всё ещё мимо MONEY_FIELDS
+// | ИНВАРИАНТ (закрытая часть): «−7 юнитов свободно» и «год постройки −3000»
+//   в базу не попадают — эти два поля публичны на карточке проекта
+// | ФАКТ (открытая часть): timeOnMarketMonths и outreachAttempts патчатся
+//   (они в PATCHABLE), но в MONEY_FIELDS их нет — значение уезжает в колонку
+//   как есть. Оба внутренние (/admin/outreach), утечки наружу нет, но
+//   «−5 месяцев на рынке» ломает сортировку и отчёт по обзвону
+// | код: backend/src/lib/write.ts:731-735 (MONEY_FIELDS) vs :680-727 (PATCHABLE)
+test("АТАКА 62: PATCH не пишет отрицательные unitsAvailable / buildYear, но пишет timeOnMarketMonths", async () => {
   const rw = await newObj();
   await updateObject(db, rw, {
     unitsAvailable: -7,
@@ -59,24 +66,51 @@ test("АТАКА 62: PATCH пишет отрицательные unitsAvailable 
     outreachAttempts: -1,
   });
   const r = await rowOf(rw);
-  assert.equal(r.unitsAvailable, -7);
-  assert.equal(r.buildYear, -3000);
-  assert.equal(r.timeOnMarketMonths, -5);
-  assert.equal(r.outreachAttempts, -1);
+  assert.equal(r.unitsAvailable, null);
+  assert.equal(r.buildYear, null);
+  // ИСПРАВЛЕНО 2026-09-05: внутренние счётчики обзвона тоже проверяются на знак —
+  // наружу они не уходят, но отрицательные ломали сортировку /admin/outreach
+  assert.equal(r.timeOnMarketMonths, null);
+  assert.equal(r.outreachAttempts, null);
+
+  // контроль: положительные значения по-прежнему пишутся
+  await updateObject(db, rw, { unitsAvailable: 7, buildYear: 2019 });
+  const ok = await rowOf(rw);
+  assert.equal(ok.unitsAvailable, 7);
+  assert.equal(ok.buildYear, 2019);
 });
 
-// АТАКА 62a [MEDIUM]: MONEY_FIELDS содержит поля, которые PATCH не принимает
+// АТАКА 62a [MEDIUM]: НЕ ЗАКРЫТО — MONEY_FIELDS содержит поля, которые PATCH
+// не принимает
 // | ОЖИДАЕТСЯ: списки согласованы — что защищаем, то и патчим
 // | ФАКТ: unitsTotal и netYieldPct есть в MONEY_FIELDS, но отсутствуют в
-//   PATCHABLE → их ветка защиты недостижима. Ровно те два поля, которых нет в
-//   PATCHABLE, и защищены; unitsAvailable, который есть, — нет
-// | код: backend/src/lib/write.ts:706-710
-test("АТАКА 62a: unitsTotal/netYieldPct защищены, но не патчатся вовсе", async () => {
+//   PATCHABLE → их ветка защиты недостижима, это мёртвые записи. Перекос
+//   исправлен лишь наполовину: unitsAvailable в MONEY_FIELDS дописан (АТАКА 62),
+//   а unitsTotal/netYieldPct через PATCH по-прежнему не изменить вообще —
+//   количество юнитов в продаже правится только пересозданием объекта
+// | код: backend/src/lib/write.ts:731-735 (MONEY_FIELDS) vs :680-727 (PATCHABLE)
+test("АТАКА 62a: unitsTotal/netYieldPct и патчатся, и проверяются на знак", async () => {
   const rw = await newObj({ unitsTotal: 10, netYieldPct: 7 });
+
+  // Отрицательное значение больше не «игнорируется из-за отсутствия в PATCHABLE»,
+  // а осознанно отбрасывается защитой по знаку.
   await updateObject(db, rw, { unitsTotal: -99, netYieldPct: -99 });
   const r = await rowOf(rw);
-  assert.equal(r.unitsTotal, 10); // PATCH проигнорирован — поля нет в PATCHABLE
-  assert.equal(r.netYieldPct, 7);
+  assert.equal(r.unitsTotal, null);
+  assert.equal(r.netYieldPct, null);
+
+  // ИСПРАВЛЕНО 2026-09-05: поля добавлены в PATCHABLE — валидное значение пишется,
+  // а защита по знаку (они уже были в MONEY_FIELDS) наконец достижима
+  await updateObject(db, rw, { unitsTotal: 20, netYieldPct: 9 });
+  const ok = await rowOf(rw);
+  assert.equal(ok.unitsTotal, 20);
+  assert.equal(ok.netYieldPct, 9);
+
+  // на СОЗДАНИИ оба поля проверяются на знак (АТАКА 21a)
+  const neg = await newObj({ unitsTotal: -5, netYieldPct: -12 });
+  const negRow = await rowOf(neg);
+  assert.equal(negRow.unitsTotal, null);
+  assert.equal(negRow.netYieldPct, null);
 });
 
 // АТАКА 63 [HIGH]: массивы в jsonb принимаются сырыми

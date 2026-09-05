@@ -1807,6 +1807,7 @@ var MAX_SCAN_CHARS = 2e4;
 var LETTER = "[a-z\u0430-\u044F\u0451]";
 var DEED_WORD = `(?<!${LETTER})(chanote|\u0447\u0430\u043D\u043E\u0442[\u0430-\u044F\u0451]*|\u0442\u0438\u0442\u0443\u043B[\u0430-\u044F\u0451]*|title\\s*deed|nor\\s*sor\\s*3(?:\\s*kor)?|ns3k?)(?!${LETTER})`;
 var DEED_INDICATOR = "(?:no\\.?|number|\u2116|#|deed\\s*no\\.?|\u0E40\u0E25\u0E02\u0E17\u0E35\u0E48)";
+var NOT_AFTER_CONTEXT = `(?<!(?<!${LETTER})(?:issued|sold|built|registered|since|from|in|of|plot|lot|unit|parcel|\u0432\u044B\u0434\u0430\u043D[\u0430-\u044F\u0451]{0,3}|\u043F\u0440\u043E\u0434\u0430\u043D[\u0430-\u044F\u0451]{0,3}|\u043F\u043E\u0441\u0442\u0440\u043E\u0435\u043D[\u0430-\u044F\u0451]{0,3}|\u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D[\u0430-\u044F\u0451]{0,3}|\u0443\u0447\u0430\u0441\u0442\u043E\u043A|\u0443\u0447\u0430\u0441\u0442\u043A\u0435|\u043B\u043E\u0442|\u043B\u043E\u0442\u0435|\u044E\u043D\u0438\u0442|\u044E\u043D\u0438\u0442\u0435|\u043E\u0442|\u0432)\\s{1,3})`;
 var REDACT_DEED = new RegExp(
   `${DEED_WORD}([^.,;)\\n]{0,20}?)${DEED_INDICATOR}\\s*#?\\s*\\d{3,}[/\\d-]*`,
   "gi"
@@ -1832,7 +1833,7 @@ var HARD_CONFIDENTIAL = [
     // документа не является: площади, годы, деньги — иначе блокировались живые
     // листинги вида «Chanote title deed, price 6500000 THB».
     re: new RegExp(
-      `${DEED_WORD}[^.\\n]{0,20}?(?<![\\d,.])\\d{4,6}(?![\\d]|[.,]\\d)(?!\\s*(?:m\xB2|m2|sqm|sq\\.?\\s*m|square\\s*met|rai|ngan|wah|degrees|\xB0|\u0440\u0430\u0439|\u043D\u0433\u0430\u043D|\u0432\u0430|\u043C\xB2|\u043A\u0432|thb|\u0E3F|\u0E1A\u0E32\u0E17|usd|\\$|eur|rub|\u20BD|\u0431\u0430\u0442|\u0433\u043E\u0434|\u0433\\.|year))`,
+      `${DEED_WORD}[^.\\n]{0,20}?${NOT_AFTER_CONTEXT}(?<![\\d,.])\\d{4,6}(?![\\d]|[.,]\\d)(?!\\s*(?:m\xB2|m2|sqm|sq\\.?\\s*m|square\\s*met|rai|ngan|wah|degrees|\xB0|\u0440\u0430\u0439|\u043D\u0433\u0430\u043D|\u0432\u0430|\u043C\xB2|\u043A\u0432|thb|\u0E3F|\u0E1A\u0E32\u0E17|usd|\\$|eur|rub|\u20BD|\u0431\u0430\u0442|\u0433\u043E\u0434|\u0433\\.|year))`,
       "i"
     ),
     label: "\u043D\u043E\u043C\u0435\u0440 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 (\u0431\u0435\u0437 \u0438\u043D\u0434\u0438\u043A\u0430\u0442\u043E\u0440\u0430)"
@@ -2316,6 +2317,12 @@ async function getNextUnitNumber(db2, parentRw) {
 function positiveOrUndefined(n) {
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : void 0;
 }
+function normalizeDecimal(raw) {
+  const compact = raw.replace(/\s/g, "");
+  if (/^\d{1,3}(,\d{3})+$/.test(compact)) return compact.replace(/,/g, "");
+  if (/^\d+,\d{1,2}$/.test(compact)) return compact.replace(",", ".");
+  return compact.replace(/,/g, "");
+}
 function parseArea(areaText) {
   if (!areaText) return {};
   const s = String(areaText);
@@ -2332,7 +2339,7 @@ function parseArea(areaText) {
   const f = (m) => m ? parseFloat(m[1].replace(",", ".").replace(/\s/g, "")) : 0;
   let sqm;
   if (mSqm) {
-    const n = parseFloat(mSqm[1].replace(/[\s,]/g, ""));
+    const n = parseFloat(normalizeDecimal(mSqm[1]));
     sqm = Number.isFinite(n) ? Math.round(n) : void 0;
   }
   let raiF = f(mRai) + f(mNgan) * 0.25 + f(mWah) * 25e-4;
@@ -2481,7 +2488,7 @@ function titleAttrsFromInput(input, rwNumber) {
     district: input.district,
     rai,
     bedrooms: input.bedrooms,
-    unitsTotal: input.unitsTotal,
+    unitsTotal: positiveOrUndefined(input.unitsTotal),
     documentType: input.documentType,
     beachfront: feat.has("BEACHFRONT"),
     seaView: feat.has("SEA_VIEW"),
@@ -2519,14 +2526,14 @@ function buildRow(input, rwNumber, title) {
     areaNote: input.area,
     priceThb: positiveOrUndefined(input.priceThb),
     pricePerRai: positiveOrUndefined(input.pricePerRai),
-    rentPerRaiMonth: input.rentPerRaiMonth,
+    rentPerRaiMonth: positiveOrUndefined(input.rentPerRaiMonth),
     rentPerMonth: positiveOrUndefined(input.rentPerMonth),
     leaseTermYears: positiveOrUndefined(input.leaseTermYears),
     leaseEscPercent: esc.percent,
     leaseEscPeriodYears: esc.periodYears,
     leaseEscNotes: esc.notes,
     leaseAdditionalTerms: input.leaseAddTerms,
-    leasePrepayment: input.leasePrepayment,
+    leasePrepayment: positiveOrUndefined(input.leasePrepayment),
     buildingRules: input.buildingRules,
     ownerName: input.owner,
     roadType: input.roadType,
@@ -2535,17 +2542,17 @@ function buildRow(input, rwNumber, title) {
     terrain: input.type === "Land" ? input.terrain : void 0,
     bedrooms: isBuilding ? positiveOrUndefined(input.bedrooms) : void 0,
     bathrooms: isBuilding ? positiveOrUndefined(input.bathrooms) : void 0,
-    buildYear: isBuilding ? input.buildYear : void 0,
+    buildYear: isBuilding ? positiveOrUndefined(input.buildYear) : void 0,
     condition: isBuilding ? input.condition : void 0,
     stage: input.stage,
     furnishing: input.furnishing,
     developer: input.developer,
     completion: input.completion,
     paymentTerms: input.paymentTerms,
-    netYieldPct: input.netYieldPct,
+    netYieldPct: positiveOrUndefined(input.netYieldPct),
     estNetIncomeYear: input.estNetIncomeYear,
-    unitsTotal: input.unitsTotal,
-    unitsAvailable: input.unitsAvailable,
+    unitsTotal: positiveOrUndefined(input.unitsTotal),
+    unitsAvailable: positiveOrUndefined(input.unitsAvailable),
     videoUrls: parseUrls(input.videoUrls),
     floorplanUrls: parseUrls(input.floorplanUrls),
     priceStages: parsePairs(input.priceStages, "label", "value"),
@@ -2655,6 +2662,8 @@ var PATCHABLE = /* @__PURE__ */ new Set([
   "developer",
   "completion",
   "unitsAvailable",
+  "unitsTotal",
+  "netYieldPct",
   "titleEn",
   "driveFolder",
   // площадь — для дозаполнения каталога (детектор полноты /admin/valuation)
@@ -2725,9 +2734,15 @@ async function updateObject(db2, rwNumber, patch) {
     "bedrooms",
     "bathrooms",
     "unitsTotal",
+    "unitsAvailable",
+    "buildYear",
     "netYieldPct",
     "areaRai",
-    "areaSqm"
+    "areaSqm",
+    // внутренние счётчики обзвона: наружу не уходят, но отрицательные значения
+    // ломают сортировку и отчёт /admin/outreach
+    "timeOnMarketMonths",
+    "outreachAttempts"
   ]);
   const TEXT_FIELDS = /* @__PURE__ */ new Set(["descriptionRaw", "descriptionManualEn", "descriptionManualRu"]);
   for (const [k, v] of Object.entries(patch)) {

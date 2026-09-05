@@ -15,14 +15,25 @@
  * `year`). Плюс `(?<![\d,.])\d{4,6}(?![\d]|[.,]\d)` — семизначная цена
  * «6500000» вообще не считается номером документа. RU- и EN-ветки сравнялись.
  *
- * Тесты стерегут фикс; 19a/19d/19e остаются ХАРАКТЕРИЗУЮЩИМИ —
- * см. комментарии, эти ложные блокировки закрыты лишь частично.
+ * ИСПРАВЛЕНО 2026-09-05 (19a/19d/19e): к правилу добавлен `NOT_AFTER_CONTEXT` —
+ * негативный просмотр НАЗАД на слово-маркер ПЕРЕД числом (issued/sold/built/
+ * registered/since/from/in/of/plot/lot/unit/parcel + кириллические). Прежняя
+ * проверка смотрела только ВПРАВО (единицы, деньги, «год»/«year» после числа),
+ * поэтому «Chanote issued in 2019» и «Chanote land plot 2400» блокировали
+ * живой листинг во все каналы.
+ *
+ * Тесты стерегут фикс.
  *   npx tsx --test src/lib/adv2-*.test.ts
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { RealEstateObject } from "./domain";
-import { toPublishable, assertNoConfidential, ConfidentialLeakError } from "./publishable";
+import {
+  toPublishable,
+  assertNoConfidential,
+  ConfidentialLeakError,
+  type PublishableObject,
+} from "./publishable";
 
 const base = (over: Partial<RealEstateObject> = {}): RealEstateObject =>
   ({
@@ -57,21 +68,28 @@ test("АТАКА 19: цена в THB рядом со словом Chanote не �
   ]);
 });
 
-// АТАКА 19a [HIGH]: НЕ ЗАКРЫТО ПОЛНОСТЬЮ — год выдачи документа это тоже 4 цифры
-// | ОЖИДАЕТСЯ: «Chanote issued in 2019» — обычная фраза DD-описания, публикуется
-// | ФАКТ: просмотр ищет слово-маркер года ПОСЛЕ числа («2019 year», «2019 году»),
-//   а в английском году предшествует предлог — «issued in 2019,» блокируется.
-//   RU-форма «Чанот выдан в 2019 году» проходит: расхождение осталось, но уже
-//   не по языку, а по порядку слов
-// | код: backend/src/lib/publishable.ts:216
-test("АТАКА 19a: год выдачи чанота перед запятой всё ещё блокирует публикацию", () => {
-  assert.equal(blockedReason("Chanote issued in 2019, quiet area, jungle view.").length, 1);
-  // а форма со словом-маркером после числа — проходит
+// АТАКА 19a [HIGH]: год выдачи документа больше не читается как номер чанота
+// | ИНВАРИАНТ: «Chanote issued in 2019» — обычная фраза DD-описания, публикуется.
+//   Маркер года распознаётся и СЛЕВА от числа (issued/sold/built/registered/in),
+//   а не только справа («2019 year», «2019 году»)
+// | код: backend/src/lib/publishable.ts:198-200 (NOT_AFTER_CONTEXT), :234-242
+test("АТАКА 19a: год выдачи чанота перед запятой не блокирует публикацию", () => {
+  assert.deepEqual(blockedReason("Chanote issued in 2019, quiet area, jungle view."), []);
+  assert.deepEqual(blockedReason("Chanote title deed, built in 2019. Road access."), []);
+  // форма со словом-маркером после числа — как и раньше, проходит
   const ru = toPublishable(base({ descriptionManualRu: "Чанот выдан в 2019 году." }), {
     channel: "telegram",
     lang: "ru",
   });
   assert.equal(ru.ok, true);
+
+  // контроль fail-closed: маркера перед числом нет — это номер документа
+  assert.deepEqual(blockedReason("Chanote 2019, road access."), [
+    "в публикуемом тексте обнаружено конфиденциальное (номер документа (без индикатора))",
+  ]);
+  assert.deepEqual(blockedReason("Chanote 13681, road access."), [
+    "в публикуемом тексте обнаружено конфиденциальное (номер документа (без индикатора))",
+  ]);
 });
 
 // АТАКА 19b [HIGH]: единицы площади словами попали в отрицательный просмотр
@@ -111,42 +129,62 @@ test("АТАКА 19c: RU-вариант той же фразы ведёт себ
   assert.equal(ruNum.ok, false);
 });
 
-// АТАКА 19d [MEDIUM]: НЕ ЗАКРЫТО — номер лота застройщика в тайтле блокирует объект
-// | ОЖИДАЕТСЯ: генератор тайтла и гейт публикации согласованы
-// | ФАКТ: «Chanote land 1600 sq wah» проходит (единица есть в просмотре), а
-//   «Chanote land plot 2400» — блокирует весь объект, хотя описание чистое:
-//   отличить номер лота от номера документа по одной цифровой форме нельзя
-// | код: backend/src/lib/publishable.ts:213-220, поле title в assertNoConfidential
-test("АТАКА 19d: 4 цифры в тайтле рядом со словом Chanote блокируют объект целиком", () => {
+// АТАКА 19d [MEDIUM]: номер лота в тайтле больше не валит объект целиком
+// | ИНВАРИАНТ: генератор тайтла и гейт публикации согласованы — «Chanote land
+//   plot 2400» публикуется. Номер лота отличается от номера документа
+//   словом-маркером слева (plot/lot/unit/parcel)
+// | код: backend/src/lib/publishable.ts:198-200, поле title в assertNoConfidential
+test("АТАКА 19d: 4 цифры в тайтле рядом со словом Chanote не блокируют объект", () => {
   const r = toPublishable(base({ titleEn: "Chanote land plot 2400", descriptionManualEn: "Quiet." }), {
     channel: "telegram",
   });
-  assert.equal(r.ok, false);
-  assert.match(r.reasons[0], /номер документа/);
+  assert.equal(r.ok, true);
+
+  const sqm = toPublishable(base({ titleEn: "Chanote land 1600 sqm", descriptionManualEn: "Quiet." }), {
+    channel: "telegram",
+  });
+  assert.equal(sqm.ok, true);
+
+  // ОСТАЁТСЯ ХАРАКТЕРИЗУЮЩИМ: единица через «sq wah» мимо просмотра вправо —
+  // в списке исключений стоит голое `wah`, а тут между числом и единицей «sq»
+  const wah = toPublishable(base({ titleEn: "Chanote land 1600 sq wah", descriptionManualEn: "Quiet." }), {
+    channel: "telegram",
+  });
+  assert.equal(wah.ok, false);
+
+  // контроль fail-closed: голый номер в тайтле по-прежнему блокирует объект
+  const bare = toPublishable(base({ titleEn: "Chanote 2400 Sri Thanu", descriptionManualEn: "Quiet." }), {
+    channel: "telegram",
+  });
+  assert.equal(bare.ok, false);
+  assert.match(bare.reasons[0], /номер документа/);
 });
 
-// АТАКА 19e [LOW]: НЕ ЗАКРЫТО — backstop бросает на дате продажи
-// | ОЖИДАЕТСЯ: исключение только на реальной утечке
-// | ФАКТ: «Chanote, sold in 2018 by the family» — тот же случай, что 19a
-//   (маркер года стоит ПЕРЕД числом), assertNoConfidential бросает
-// | код: backend/src/lib/publishable.ts:216,341-350
-test("АТАКА 19e: assertNoConfidential бросает на дате продажи", () => {
-  assert.throws(
-    () =>
-      assertNoConfidential({
-        rwNumber: "RW-L0042",
-        type: "Land",
-        lang: "en",
-        title: "Plot",
-        typeLabel: "Land",
-        district: "Sri Thanu",
-        tenureLabel: "Freehold",
-        features: [],
-        gallery: [],
-        vetted: false,
-        url: "https://rightwaygroup.co/object/RW-L0042",
-        description: "Chanote, sold in 2018 by the family.",
-      }),
-    ConfidentialLeakError,
-  );
+// АТАКА 19e [LOW]: backstop бросает только на реальной утечке
+// | ИНВАРИАНТ: assertNoConfidential — последний рубеж перед отправкой в канал,
+//   и он молчит на дате продажи («sold in 2018»), но по-прежнему бросает на
+//   голом номере документа. Ложное исключение здесь убивает публикацию без
+//   шанса на ручное исправление — оно летит уже после гейта
+// | код: backend/src/lib/publishable.ts:198-200, assertNoConfidential
+test("АТАКА 19e: assertNoConfidential не бросает на дате продажи", () => {
+  const payload = (description: string): PublishableObject => ({
+    rwNumber: "RW-L0042",
+    type: "Land",
+    lang: "en",
+    title: "Plot",
+    typeLabel: "Land",
+    district: "Sri Thanu",
+    tenureLabel: "Freehold",
+    features: [],
+    gallery: [],
+    vetted: false,
+    url: "https://rightwaygroup.co/object/RW-L0042",
+    description,
+  });
+  assert.doesNotThrow(() => assertNoConfidential(payload("Chanote, sold in 2018 by the family.")));
+  assert.doesNotThrow(() => assertNoConfidential(payload("Chanote, registered 2018.")));
+
+  // контроль fail-closed: настоящий номер документа так же бросает
+  assert.throws(() => assertNoConfidential(payload("Chanote 13681.")), ConfidentialLeakError);
+  assert.throws(() => assertNoConfidential(payload("Chanote no. 13681.")), ConfidentialLeakError);
 });
