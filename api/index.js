@@ -3483,7 +3483,7 @@ async function countDraftPosts(db2) {
 }
 
 // src/lib/agent-tasks.ts
-import { eq as eq12, desc as desc5 } from "drizzle-orm";
+import { eq as eq12, and as and7, desc as desc5 } from "drizzle-orm";
 var AgentTaskInputError = class extends Error {
 };
 var TASK_STATUSES = ["open", "done"];
@@ -3527,11 +3527,15 @@ async function createSession(db2, input) {
   const question = String(input.question ?? "").trim();
   const answer = String(input.answer ?? "").trim();
   if (!question || !answer) throw new AgentTaskInputError("question and answer are required");
+  if (input.status !== void 0 && input.status !== "done" && input.status !== "error")
+    throw new AgentTaskInputError("status must be done or error");
+  const status = input.status ?? "done";
   const [row] = await db2.insert(councilSessions).values({
     question,
     answer,
     source: input.source?.trim() || "advice",
-    status: "done",
+    status,
+    errorText: status === "error" ? String(input.errorText || answer).slice(0, 600) : null,
     answeredAt: /* @__PURE__ */ new Date()
   }).returning();
   return row;
@@ -3551,7 +3555,7 @@ async function updateSession(db2, id, patch) {
   if (patch.answer !== void 0) set.answer = patch.answer;
   if (patch.errorText !== void 0) set.errorText = patch.errorText;
   if (Object.keys(set).length === 0) return getSessionById(db2, id);
-  const [row] = await db2.update(councilSessions).set(set).where(eq12(councilSessions.id, id)).returning();
+  const [row] = await db2.update(councilSessions).set(set).where(patch.status === "processing" ? and7(eq12(councilSessions.id, id), eq12(councilSessions.status, "pending")) : eq12(councilSessions.id, id)).returning();
   return row ?? null;
 }
 async function listSessions(db2, opts = {}) {
