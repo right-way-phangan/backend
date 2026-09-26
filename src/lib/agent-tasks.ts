@@ -100,6 +100,8 @@ export interface CouncilSessionInputDTO {
   question: string;
   answer: string;
   source?: string; // advice | task
+  status?: "done" | "error";
+  errorText?: string;
 }
 
 /** Готовый совет (бот из Telegram пишет сразу с ответом → status=done). */
@@ -110,13 +112,17 @@ export async function createSession(
   const question = String(input.question ?? "").trim();
   const answer = String(input.answer ?? "").trim();
   if (!question || !answer) throw new AgentTaskInputError("question and answer are required");
+  if (input.status !== undefined && input.status !== "done" && input.status !== "error")
+    throw new AgentTaskInputError("status must be done or error");
+  const status = input.status ?? "done";
   const [row] = await db
     .insert(councilSessions)
     .values({
       question,
       answer,
       source: input.source?.trim() || "advice",
-      status: "done",
+      status,
+      errorText: status === "error" ? String(input.errorText || answer).slice(0, 600) : null,
       answeredAt: new Date(),
     })
     .returning();
@@ -161,7 +167,9 @@ export async function updateSession(
   const [row] = await db
     .update(councilSessions)
     .set(set)
-    .where(eq(councilSessions.id, id))
+    .where(patch.status === "processing"
+      ? and(eq(councilSessions.id, id), eq(councilSessions.status, "pending"))
+      : eq(councilSessions.id, id))
     .returning();
   return row ?? null;
 }
