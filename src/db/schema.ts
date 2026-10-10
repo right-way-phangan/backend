@@ -32,6 +32,7 @@ import {
   uniqueIndex,
   primaryKey,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const objects = pgTable(
   "objects",
@@ -467,6 +468,9 @@ export const contacts = pgTable(
     firstName: text("first_name"),
     email: text("email"),
     phone: text("phone"),
+    telegram: text("telegram"),
+    whatsapp: text("whatsapp"),
+    preferredChannel: text("preferred_channel"), // phone | email | telegram | whatsapp
     amoContactId: bigint("amo_contact_id", { mode: "number" }).unique(), // migration traceability
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -496,12 +500,17 @@ export const leads = pgTable(
     kind: text("kind"), // inquiry | calculator | market-report | shortlist | saved-search
     vid: text("vid"), // anonymous visitor id — links lead to its browse journey (visitor_events / object_view_visitors)
     tags: text("tags").array(),
+    intent: text("intent"), // consultation | price_pack | availability | floorplan | payment_schedule | income …
+    idempotencyKey: text("idempotency_key"), // client-generated; repeated POST /leads with the same key returns the existing lead
+    attribution: jsonb("attribution").$type<{ first?: Record<string, string>; last?: Record<string, string> }>(), // utm/click-ids, first & last touch
+    qualification: jsonb("qualification").$type<{ goal?: string; budget?: string; horizon?: string }>(), // filled after submit (PATCH /leads/by-key/:key/qualification)
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     stageIdx: index("leads_stage_idx").on(t.stageId),
     contactIdx: index("leads_contact_idx").on(t.contactId),
+    idemUq: uniqueIndex("leads_idempotency_key_uq").on(t.idempotencyKey).where(sql`${t.idempotencyKey} is not null`),
   }),
 );
 
@@ -527,7 +536,8 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   name: text("name"),
-  role: text("role").notNull().default("agent"), // admin | agent
+  role: text("role").notNull().default("agent"), // admin | agent | partner
+  developer: text("developer"), // partner only: developer slug (e.g. arqa-development) → sees leads tagged developer:<slug>
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

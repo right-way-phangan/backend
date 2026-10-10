@@ -103,7 +103,14 @@ export async function seedCrm(db: AnyPgDatabase): Promise<void> {
 export interface NewLeadInput {
   leadName: string;
   pipeline: "land" | "villa_house" | "owners";
-  contact: { name: string; email?: string; phone?: string };
+  contact: {
+    name: string;
+    email?: string;
+    phone?: string;
+    telegram?: string;
+    whatsapp?: string;
+    preferredChannel?: "phone" | "email" | "telegram" | "whatsapp";
+  };
   /** Reuse an existing contact row (legacy revive) instead of creating a new one. */
   contactId?: number;
   note?: string;
@@ -113,6 +120,12 @@ export interface NewLeadInput {
   kind?: string;
   /** anonymous visitor id — links the lead to its browse journey */
   vid?: string;
+  /** consultation | price_pack | availability | floorplan | payment_schedule | income … → leads.intent + tag `intent:<value>` */
+  intent?: string;
+  /** client-generated (≤80 chars); a repeated POST with the same key returns the existing lead with duplicate:true */
+  idempotencyKey?: string;
+  /** first/last touch: utm_*, yclid, gclid, fbclid, referrer, landing, ts … (strings ≤300, ≤30 keys per touch) */
+  attribution?: { first?: Record<string, string>; last?: Record<string, string> };
   /** default true; bulk import passes false to avoid flooding tomorrow's tasks */
   autoTask?: boolean;
 }
@@ -122,7 +135,56 @@ export interface CreateLeadResult {
   contactId: number;
   pipeline: string;
   stage: string;
+  /** true when idempotencyKey matched an existing lead (nothing was created) */
+  duplicate?: boolean;
 }
+
+const CHANNELS = ["phone", "email", "telegram", "whatsapp"] as const;
+const INTENT_RE = /^[a-z0-9_-]{1,40}$/i;
+
+function cleanStr(v: unknown, max: number): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const t = v.trim().slice(0, max);
+  return t || undefined;
+}
+
+function cleanTouch(t: unknown): Record<string, string> | undefined {
+  if (!t || typeof t !== "object" || Array.isArray(t)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(t as Record<string, unknown>)) {
+    if (Object.keys(out).length >= 30) break;
+    if (typeof v !== "string" || !/^[\w.-]{1,40}$/.test(k)) continue;
+    out[k] = v.slice(0, 300);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Only strings, ≤300 chars, ≤30 keys per touch; anything else is dropped. */
+export function sanitizeAttribution(a: unknown): { first?: Record<string, string>; last?: Record<string, string> } | undefined {
+  if (!a || typeof a !== "object") return undefined;
+  const first = cleanTouch((a as { first?: unknown }).first);
+  const last = cleanTouch((a as { last?: unknown }).last);
+  return first || last ? { ...(first && { first }), ...(last && { last }) } : undefined;
+}
+
+async function findLeadByKey(db: AnyPgDatabase, key: string): Promise<CreateLeadResult | null> {
+  const [row] = await db
+    .select({ leadId: leads.id, contactId: leads.contactId, pipeline: pipelines.name, stage: stages.name })
+    .from(leads)
+    .leftJoin(pipelines, eq(leads.pipelineId, pipelines.id))
+    .leftJoin(stages, eq(leads.stageId, stages.id))
+    .where(eq(leads.idempotencyKey, key));
+  if (!row) return null;
+  return {
+    leadId: row.leadId,
+    contactId: row.contactId as number,
+    pipeline: row.pipeline ?? "—",
+    stage: row.stage ?? "—",
+    duplicate: true,
+  };
+}
+
+class DuplicateKey extends Error {}
 
 export async function createLead(
   db: AnyPgDatabase,
@@ -141,7 +203,19 @@ export async function createLead(
     .orderBy(asc(stages.sort))
     .limit(1);
 
-  return db.transaction(async (tx: AnyPgDatabase) => {
+  const idemKey = cleanStr(input.idempotencyKey, 80);
+  if (idemKey) {
+    const dup = await findLeadByKey(db, idemKey);
+    if (dup) return dup;
+  }
+  const intent = typeof input.intent === "string" && INTENT_RE.test(input.intent.trim()) ? input.intent.trim().toLowerCase() : undefined;
+  const tagList = [...(input.tags ?? [])];
+  if (intent && !tagList.includes(`intent:${intent}`)) tagList.push(`intent:${intent}`);
+  const attribution = sanitizeAttribution(input.attribution);
+  const channel = CHANNELS.find((c) => c === input.contact.preferredChannel);
+
+  try {
+  return await db.transaction(async (tx: AnyPgDatabase) => {
     // Either link the existing contact (legacy revive keeps the book clean)
     // or create a fresh one from the form payload.
     let contactId = input.contactId ?? null;
@@ -159,13 +233,16 @@ export async function createLead(
           firstName: input.contact.name,
           email: input.contact.email,
           phone: input.contact.phone,
+          telegram: cleanStr(input.contact.telegram, 120),
+          whatsapp: cleanStr(input.contact.whatsapp, 60),
+          preferredChannel: channel,
         })
         .returning({ id: contacts.id });
       contactId = created.id;
     }
     const contact = { id: contactId };
 
-    const [lead] = await tx
+    const inserted = await tx
       .insert(leads)
       .values({
         name: input.leadName,
@@ -177,10 +254,17 @@ export async function createLead(
         source: input.source,
         kind: input.kind,
         vid: input.vid,
-        tags: input.tags?.length ? input.tags : undefined,
+        tags: tagList.length ? tagList : undefined,
+        intent,
+        idempotencyKey: idemKey,
+        attribution,
         updatedAt: new Date(),
       })
+      .onConflictDoNothing()
       .returning({ id: leads.id });
+    // Parallel request with the same key won the race → roll back this tx (incl. contact).
+    if (!inserted.length) throw new DuplicateKey();
+    const [lead] = inserted;
 
     if (input.note?.trim()) {
       await tx.insert(leadNotes).values({ leadId: lead.id, text: input.note.trim() });
@@ -212,6 +296,53 @@ export async function createLead(
       stage: stage?.name ?? "—",
     };
   });
+  } catch (err) {
+    if (err instanceof DuplicateKey && idemKey) {
+      const dup = await findLeadByKey(db, idemKey);
+      if (dup) return dup;
+    }
+    throw err;
+  }
+}
+
+const GOALS = ["live", "rent", "both"] as const;
+
+/**
+ * Merge post-submit qualification ({goal,budget,horizon}) into the lead found
+ * by its idempotency key. null = key not found; throws RangeError on bad input.
+ */
+export async function qualifyLeadByKey(
+  db: AnyPgDatabase,
+  key: string,
+  input: { goal?: unknown; budget?: unknown; horizon?: unknown },
+): Promise<{ leadId: number } | null> {
+  const patch: { goal?: string; budget?: string; horizon?: string } = {};
+  if (input.goal !== undefined) {
+    if (!GOALS.some((g) => g === input.goal)) throw new RangeError("goal must be live|rent|both");
+    patch.goal = input.goal as string;
+  }
+  for (const f of ["budget", "horizon"] as const) {
+    if (input[f] === undefined) continue;
+    const v = cleanStr(input[f], 100);
+    if (!v) throw new RangeError(`${f} must be a non-empty string`);
+    patch[f] = v;
+  }
+  if (!Object.keys(patch).length) throw new RangeError("nothing to save");
+
+  const [row] = await db
+    .select({ id: leads.id, qualification: leads.qualification })
+    .from(leads)
+    .where(eq(leads.idempotencyKey, key.slice(0, 80)));
+  if (!row) return null;
+  const merged = { ...(row.qualification ?? {}), ...patch };
+  await db.update(leads).set({ qualification: merged, updatedAt: new Date() }).where(eq(leads.id, row.id));
+  const parts = [
+    merged.goal && `цель: ${merged.goal}`,
+    merged.budget && `бюджет: ${merged.budget}`,
+    merged.horizon && `горизонт: ${merged.horizon}`,
+  ].filter(Boolean);
+  await addNote(db, row.id, `Квалификация: ${parts.join(", ")}`);
+  return { leadId: row.id };
 }
 
 /** Leads with contact + stage + pipeline (names + keys) — for the CRM board.
@@ -313,12 +444,18 @@ export async function getLead(db: AnyPgDatabase, id: number) {
       source: leads.source,
       kind: leads.kind,
       tags: leads.tags,
+      intent: leads.intent,
+      attribution: leads.attribution,
+      qualification: leads.qualification,
       createdAt: leads.createdAt,
       updatedAt: leads.updatedAt,
       contactId: leads.contactId,
       contactName: contacts.firstName,
       email: contacts.email,
       phone: contacts.phone,
+      telegram: contacts.telegram,
+      whatsapp: contacts.whatsapp,
+      preferredChannel: contacts.preferredChannel,
       pipeline: pipelines.name,
       pipelineKey: pipelines.key,
       stage: stages.name,
