@@ -615,8 +615,8 @@ app.delete("/leads/:id", async (c) => {
 });
 
 app.post("/leads/:id/notes", async (c) => {
-  const { text } = await c.req.json();
-  const res = await addNote(db, Number(c.req.param("id")), String(text ?? ""));
+  const { text, sharedWithPartner } = await c.req.json();
+  const res = await addNote(db, Number(c.req.param("id")), String(text ?? ""), sharedWithPartner === true);
   return res ? c.json(res, 201) : c.json({ error: "empty note" }, 400);
 });
 

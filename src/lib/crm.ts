@@ -551,11 +551,16 @@ export async function setDealChecklistItem(
   return checklist;
 }
 
-export async function addNote(db: AnyPgDatabase, leadId: number, text: string) {
+export async function addNote(
+  db: AnyPgDatabase,
+  leadId: number,
+  text: string,
+  sharedWithPartner = false,
+) {
   if (!text.trim()) return null;
   const [n] = await db
     .insert(leadNotes)
-    .values({ leadId, text: text.trim() })
+    .values({ leadId, text: text.trim(), sharedWithPartner })
     .returning({ id: leadNotes.id });
   await db.update(leads).set({ updatedAt: new Date() }).where(eq(leads.id, leadId));
   return n;

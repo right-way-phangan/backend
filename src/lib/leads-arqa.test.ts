@@ -11,7 +11,7 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 import type { AnyPgDatabase } from "./load";
-import { seedCrm, createLead, qualifyLeadByKey, getLead, sanitizeAttribution } from "./crm";
+import { seedCrm, createLead, qualifyLeadByKey, getLead, sanitizeAttribution, addNote } from "./crm";
 import { createUser, verifyLogin } from "./auth";
 
 let client: PGlite;
@@ -118,6 +118,19 @@ test("qualification: мерж по ключу, заметка, 404 и валид
   assert.equal(await qualifyLeadByKey(db, "missing", { goal: "rent" }), null);
   await assert.rejects(qualifyLeadByKey(db, "k-q", { goal: "sell" }), RangeError);
   await assert.rejects(qualifyLeadByKey(db, "k-q", {}), RangeError);
+});
+
+test("заметки: по умолчанию внутренние (в т.ч. системные), sharedWithPartner — явно", async () => {
+  const r = await createLead(db, { ...base, idempotencyKey: "k-notes", note: "с сайта" });
+  await qualifyLeadByKey(db, "k-notes", { goal: "live" });
+  await addNote(db, r.leadId, "внутренняя");
+  await addNote(db, r.leadId, "для партнёра", true);
+  const notes = (await getLead(db, r.leadId))!.notes as { text: string; sharedWithPartner: boolean }[];
+  assert.deepEqual(
+    notes.filter((n) => n.sharedWithPartner).map((n) => n.text),
+    ["для партнёра"],
+  );
+  assert.equal(notes.length, 4);
 });
 
 test("createUser: partner требует developer, остальные его не принимают", async () => {

@@ -1,4 +1,5 @@
--- Лиды ARQA: intent / idempotency / attribution / qualification, расширенный контакт, users.developer.
+-- Лиды ARQA: intent / idempotency / attribution / qualification, расширенный контакт, users.developer,
+-- lead_notes.shared_with_partner (по умолчанию заметка внутренняя — партнёр её не видит).
 -- Аддитивно и идемпотентно: безопасно накатывать ДО деплоя кода (старый код колонок не трогает).
 ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "telegram" text;--> statement-breakpoint
 ALTER TABLE "contacts" ADD COLUMN IF NOT EXISTS "whatsapp" text;--> statement-breakpoint
@@ -8,4 +9,5 @@ ALTER TABLE "leads" ADD COLUMN IF NOT EXISTS "idempotency_key" text;--> statemen
 ALTER TABLE "leads" ADD COLUMN IF NOT EXISTS "attribution" jsonb;--> statement-breakpoint
 ALTER TABLE "leads" ADD COLUMN IF NOT EXISTS "qualification" jsonb;--> statement-breakpoint
 ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "developer" text;--> statement-breakpoint
+ALTER TABLE "lead_notes" ADD COLUMN IF NOT EXISTS "shared_with_partner" boolean DEFAULT false NOT NULL;--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "leads_idempotency_key_uq" ON "leads" USING btree ("idempotency_key") WHERE "leads"."idempotency_key" is not null;

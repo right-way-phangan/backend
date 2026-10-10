@@ -457,6 +457,8 @@ var leadNotes = pgTable(
     id: serial("id").primaryKey(),
     leadId: integer("lead_id").notNull().references(() => leads.id, { onDelete: "cascade" }),
     text: text("text").notNull(),
+    /** Видна партнёру-застройщику (роль partner). По умолчанию — внутренняя. */
+    sharedWithPartner: boolean("shared_with_partner").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
   },
   (t) => ({ leadIdx: index("lead_notes_lead_idx").on(t.leadId) })
@@ -1536,9 +1538,9 @@ async function setDealChecklistItem(db2, leadId, key, done) {
   await db2.update(leads).set({ dealChecklist: checklist, updatedAt: /* @__PURE__ */ new Date() }).where(eq2(leads.id, leadId));
   return checklist;
 }
-async function addNote(db2, leadId, text2) {
+async function addNote(db2, leadId, text2, sharedWithPartner = false) {
   if (!text2.trim()) return null;
-  const [n] = await db2.insert(leadNotes).values({ leadId, text: text2.trim() }).returning({ id: leadNotes.id });
+  const [n] = await db2.insert(leadNotes).values({ leadId, text: text2.trim(), sharedWithPartner }).returning({ id: leadNotes.id });
   await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq2(leads.id, leadId));
   return n;
 }
@@ -4449,8 +4451,8 @@ app.delete("/leads/:id", async (c) => {
   }
 });
 app.post("/leads/:id/notes", async (c) => {
-  const { text: text2 } = await c.req.json();
-  const res = await addNote(db, Number(c.req.param("id")), String(text2 ?? ""));
+  const { text: text2, sharedWithPartner } = await c.req.json();
+  const res = await addNote(db, Number(c.req.param("id")), String(text2 ?? ""), sharedWithPartner === true);
   return res ? c.json(res, 201) : c.json({ error: "empty note" }, 400);
 });
 app.post("/leads/:id/tasks", async (c) => {

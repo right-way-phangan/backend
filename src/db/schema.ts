@@ -522,6 +522,8 @@ export const leadNotes = pgTable(
       .notNull()
       .references(() => leads.id, { onDelete: "cascade" }),
     text: text("text").notNull(),
+    /** Видна партнёру-застройщику (роль partner). По умолчанию — внутренняя. */
+    sharedWithPartner: boolean("shared_with_partner").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({ leadIdx: index("lead_notes_lead_idx").on(t.leadId) }),
