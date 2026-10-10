@@ -80,7 +80,7 @@ test("АТАКА 70: migrate() поверх вручную применённы�
   const applied = await client.query<{ hash: string }>(
     "select hash from drizzle.__drizzle_migrations",
   );
-  assert.equal(applied.rows.length, 33);
+  assert.equal(applied.rows.length, 34);
   await client.close();
 });
 
@@ -112,8 +112,8 @@ test("АТАКА 70a: после migrate() в базе есть все коло�
 // | ФАКТ: расхождений нет ни в одну сторону; цепочка prevId 0027 → 0032 цела,
 //   то есть генератор возьмёт именно этот снапшот за базу
 // | код: backend/drizzle/meta/0032_snapshot.json
-test("АТАКА 70b: снапшот 0032 совпадает со schema.ts по колонкам и держит цепочку prevId", () => {
-  const snap = JSON.parse(readFileSync(join(FOLDER, "meta/0032_snapshot.json"), "utf8")) as {
+test("АТАКА 70b: снапшот 0033 совпадает со schema.ts по колонкам и держит цепочку prevId", () => {
+  const snap = JSON.parse(readFileSync(join(FOLDER, "meta/0033_snapshot.json"), "utf8")) as {
     prevId: string;
     tables: Record<string, { columns: Record<string, unknown> }>;
   };
@@ -133,7 +133,7 @@ test("АТАКА 70b: снапшот 0032 совпадает со schema.ts по
   assert.deepEqual(missing, []);
   assert.deepEqual(extra, []);
 
-  const prev = JSON.parse(readFileSync(join(FOLDER, "meta/0027_snapshot.json"), "utf8")) as {
+  const prev = JSON.parse(readFileSync(join(FOLDER, "meta/0032_snapshot.json"), "utf8")) as {
     id: string;
   };
   assert.equal(snap.prevId, prev.id);

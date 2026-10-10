@@ -29,7 +29,7 @@ import {
   createObject, updateObject, deleteObject, addObjectPhotos, replaceObjectContacts, ObjectInputError,
 } from "../lib/write";
 import {
-  createLead, listLeads, listPipelines, updateLead, seedCrm,
+  createLead, qualifyLeadByKey, listLeads, listPipelines, updateLead, seedCrm,
   getLead, addNote, addTask, updateTask, listTasks, updateLeadContact, deleteLead,
   setDealChecklistItem,
   listEvents, listContacts, addTouch, addShortlistView, mergeContacts,
@@ -517,10 +517,23 @@ app.post("/leads", async (c) => {
   try {
     const input = await c.req.json();
     const res = await createLead(db, input);
-    return c.json(res, 201);
+    return c.json(res, res.duplicate ? 200 : 201);
   } catch (err) {
     console.error("[POST /leads]", err);
     return c.json({ error: "create lead failed" }, 500);
+  }
+});
+
+/** Post-submit qualification, keyed by the lead's idempotencyKey: { goal?, budget?, horizon? }. */
+app.patch("/leads/by-key/:key/qualification", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const res = await qualifyLeadByKey(db, c.req.param("key"), body ?? {});
+    return res ? c.json({ ok: true, leadId: res.leadId }) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    if (err instanceof RangeError) return c.json({ error: err.message }, 400);
+    console.error("[PATCH /leads/by-key/:key/qualification]", err);
+    return c.json({ error: "qualification failed" }, 500);
   }
 });
 
@@ -602,8 +615,8 @@ app.delete("/leads/:id", async (c) => {
 });
 
 app.post("/leads/:id/notes", async (c) => {
-  const { text } = await c.req.json();
-  const res = await addNote(db, Number(c.req.param("id")), String(text ?? ""));
+  const { text, sharedWithPartner } = await c.req.json();
+  const res = await addNote(db, Number(c.req.param("id")), String(text ?? ""), sharedWithPartner === true);
   return res ? c.json(res, 201) : c.json({ error: "empty note" }, 400);
 });
 

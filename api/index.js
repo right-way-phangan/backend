@@ -67,6 +67,7 @@ import {
   uniqueIndex,
   primaryKey
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 var objects = pgTable(
   "objects",
   {
@@ -389,6 +390,10 @@ var contacts = pgTable(
     firstName: text("first_name"),
     email: text("email"),
     phone: text("phone"),
+    telegram: text("telegram"),
+    whatsapp: text("whatsapp"),
+    preferredChannel: text("preferred_channel"),
+    // phone | email | telegram | whatsapp
     amoContactId: bigint("amo_contact_id", { mode: "number" }).unique(),
     // migration traceability
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
@@ -429,12 +434,21 @@ var leads = pgTable(
     vid: text("vid"),
     // anonymous visitor id — links lead to its browse journey (visitor_events / object_view_visitors)
     tags: text("tags").array(),
+    intent: text("intent"),
+    // consultation | price_pack | availability | floorplan | payment_schedule | income …
+    idempotencyKey: text("idempotency_key"),
+    // client-generated; repeated POST /leads with the same key returns the existing lead
+    attribution: jsonb("attribution").$type(),
+    // utm/click-ids, first & last touch
+    qualification: jsonb("qualification").$type(),
+    // filled after submit (PATCH /leads/by-key/:key/qualification)
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
   },
   (t) => ({
     stageIdx: index("leads_stage_idx").on(t.stageId),
-    contactIdx: index("leads_contact_idx").on(t.contactId)
+    contactIdx: index("leads_contact_idx").on(t.contactId),
+    idemUq: uniqueIndex("leads_idempotency_key_uq").on(t.idempotencyKey).where(sql`${t.idempotencyKey} is not null`)
   })
 );
 var leadNotes = pgTable(
@@ -443,6 +457,8 @@ var leadNotes = pgTable(
     id: serial("id").primaryKey(),
     leadId: integer("lead_id").notNull().references(() => leads.id, { onDelete: "cascade" }),
     text: text("text").notNull(),
+    /** Видна партнёру-застройщику (роль partner). По умолчанию — внутренняя. */
+    sharedWithPartner: boolean("shared_with_partner").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
   },
   (t) => ({ leadIdx: index("lead_notes_lead_idx").on(t.leadId) })
@@ -453,7 +469,9 @@ var users = pgTable("users", {
   passwordHash: text("password_hash").notNull(),
   name: text("name"),
   role: text("role").notNull().default("agent"),
-  // admin | agent
+  // admin | agent | partner
+  developer: text("developer"),
+  // partner only: developer slug (e.g. arqa-development) → sees leads tagged developer:<slug>
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 });
 var leadTasks = pgTable(
@@ -1175,7 +1193,7 @@ async function getAllObjects(db2) {
 import { and as and2, eq as eq3, gte as gte2 } from "drizzle-orm";
 
 // src/lib/crm.ts
-import { eq as eq2, and, asc, desc, gte, sql } from "drizzle-orm";
+import { eq as eq2, and, asc, desc, gte, sql as sql2 } from "drizzle-orm";
 var PIPELINES = [
   { key: "land", name: "Land", sort: 0 },
   { key: "villa_house", name: "Villas & Houses", sort: 1 },
@@ -1237,64 +1255,152 @@ async function seedCrm(db2) {
     }
   }
 }
+var CHANNELS = ["phone", "email", "telegram", "whatsapp"];
+var INTENT_RE = /^[a-z0-9_-]{1,40}$/i;
+function cleanStr(v, max) {
+  if (typeof v !== "string") return void 0;
+  const t = v.trim().slice(0, max);
+  return t || void 0;
+}
+function cleanTouch(t) {
+  if (!t || typeof t !== "object" || Array.isArray(t)) return void 0;
+  const out = {};
+  for (const [k, v] of Object.entries(t)) {
+    if (Object.keys(out).length >= 30) break;
+    if (typeof v !== "string" || !/^[\w.-]{1,40}$/.test(k)) continue;
+    out[k] = v.slice(0, 300);
+  }
+  return Object.keys(out).length ? out : void 0;
+}
+function sanitizeAttribution(a) {
+  if (!a || typeof a !== "object") return void 0;
+  const first = cleanTouch(a.first);
+  const last = cleanTouch(a.last);
+  return first || last ? { ...first && { first }, ...last && { last } } : void 0;
+}
+async function findLeadByKey(db2, key) {
+  const [row] = await db2.select({ leadId: leads.id, contactId: leads.contactId, pipeline: pipelines.name, stage: stages.name }).from(leads).leftJoin(pipelines, eq2(leads.pipelineId, pipelines.id)).leftJoin(stages, eq2(leads.stageId, stages.id)).where(eq2(leads.idempotencyKey, key));
+  if (!row) return null;
+  return {
+    leadId: row.leadId,
+    contactId: row.contactId,
+    pipeline: row.pipeline ?? "\u2014",
+    stage: row.stage ?? "\u2014",
+    duplicate: true
+  };
+}
+var DuplicateKey = class extends Error {
+};
 async function createLead(db2, input) {
   const [pipe] = await db2.select().from(pipelines).where(eq2(pipelines.key, input.pipeline)) ?? [];
   const pipeline = pipe ?? (await db2.select().from(pipelines).where(eq2(pipelines.key, "land")))[0];
   if (!pipeline) throw new Error("CRM not seeded: no pipelines. Run seedCrm().");
   const [stage] = await db2.select().from(stages).where(eq2(stages.pipelineId, pipeline.id)).orderBy(asc(stages.sort)).limit(1);
-  return db2.transaction(async (tx) => {
-    let contactId = input.contactId ?? null;
-    if (contactId != null) {
-      const [existing] = await tx.select({ id: contacts.id }).from(contacts).where(eq2(contacts.id, contactId));
-      if (!existing) contactId = null;
-    }
-    if (contactId == null) {
-      const [created] = await tx.insert(contacts).values({
-        firstName: input.contact.name,
-        email: input.contact.email,
-        phone: input.contact.phone
-      }).returning({ id: contacts.id });
-      contactId = created.id;
-    }
-    const contact = { id: contactId };
-    const [lead] = await tx.insert(leads).values({
-      name: input.leadName,
-      pipelineId: pipeline.id,
-      stageId: stage?.id,
-      contactId: contact.id,
-      status: "open",
-      rwNumber: input.rwNumber,
-      source: input.source,
-      kind: input.kind,
-      vid: input.vid,
-      tags: input.tags?.length ? input.tags : void 0,
-      updatedAt: /* @__PURE__ */ new Date()
-    }).returning({ id: leads.id });
-    if (input.note?.trim()) {
-      await tx.insert(leadNotes).values({ leadId: lead.id, text: input.note.trim() });
-    }
-    await tx.insert(leadEvents).values({
-      leadId: lead.id,
-      type: "created",
-      toStage: stage?.name ?? null
-    });
-    if (input.autoTask !== false) {
-      const due = /* @__PURE__ */ new Date();
-      due.setUTCDate(due.getUTCDate() + 1);
-      due.setUTCHours(3, 0, 0, 0);
-      await tx.insert(leadTasks).values({
+  const idemKey = cleanStr(input.idempotencyKey, 80);
+  if (idemKey) {
+    const dup = await findLeadByKey(db2, idemKey);
+    if (dup) return dup;
+  }
+  const intent = typeof input.intent === "string" && INTENT_RE.test(input.intent.trim()) ? input.intent.trim().toLowerCase() : void 0;
+  const tagList = [...input.tags ?? []];
+  if (intent && !tagList.includes(`intent:${intent}`)) tagList.push(`intent:${intent}`);
+  const attribution = sanitizeAttribution(input.attribution);
+  const channel = CHANNELS.find((c) => c === input.contact.preferredChannel);
+  try {
+    return await db2.transaction(async (tx) => {
+      let contactId = input.contactId ?? null;
+      if (contactId != null) {
+        const [existing] = await tx.select({ id: contacts.id }).from(contacts).where(eq2(contacts.id, contactId));
+        if (!existing) contactId = null;
+      }
+      if (contactId == null) {
+        const [created] = await tx.insert(contacts).values({
+          firstName: input.contact.name,
+          email: input.contact.email,
+          phone: input.contact.phone,
+          telegram: cleanStr(input.contact.telegram, 120),
+          whatsapp: cleanStr(input.contact.whatsapp, 60),
+          preferredChannel: channel
+        }).returning({ id: contacts.id });
+        contactId = created.id;
+      }
+      const contact = { id: contactId };
+      const inserted = await tx.insert(leads).values({
+        name: input.leadName,
+        pipelineId: pipeline.id,
+        stageId: stage?.id,
+        contactId: contact.id,
+        status: "open",
+        rwNumber: input.rwNumber,
+        source: input.source,
+        kind: input.kind,
+        vid: input.vid,
+        tags: tagList.length ? tagList : void 0,
+        intent,
+        idempotencyKey: idemKey,
+        attribution,
+        updatedAt: /* @__PURE__ */ new Date()
+      }).onConflictDoNothing().returning({ id: leads.id });
+      if (!inserted.length) throw new DuplicateKey();
+      const [lead] = inserted;
+      if (input.note?.trim()) {
+        await tx.insert(leadNotes).values({ leadId: lead.id, text: input.note.trim() });
+      }
+      await tx.insert(leadEvents).values({
         leadId: lead.id,
-        title: "\u{1F4DE} \u0421\u0432\u044F\u0437\u0430\u0442\u044C\u0441\u044F \u0441 \u043B\u0438\u0434\u043E\u043C (\u0430\u0432\u0442\u043E)",
-        dueAt: due
+        type: "created",
+        toStage: stage?.name ?? null
       });
+      if (input.autoTask !== false) {
+        const due = /* @__PURE__ */ new Date();
+        due.setUTCDate(due.getUTCDate() + 1);
+        due.setUTCHours(3, 0, 0, 0);
+        await tx.insert(leadTasks).values({
+          leadId: lead.id,
+          title: "\u{1F4DE} \u0421\u0432\u044F\u0437\u0430\u0442\u044C\u0441\u044F \u0441 \u043B\u0438\u0434\u043E\u043C (\u0430\u0432\u0442\u043E)",
+          dueAt: due
+        });
+      }
+      return {
+        leadId: lead.id,
+        contactId: contact.id,
+        pipeline: pipeline.name,
+        stage: stage?.name ?? "\u2014"
+      };
+    });
+  } catch (err) {
+    if (err instanceof DuplicateKey && idemKey) {
+      const dup = await findLeadByKey(db2, idemKey);
+      if (dup) return dup;
     }
-    return {
-      leadId: lead.id,
-      contactId: contact.id,
-      pipeline: pipeline.name,
-      stage: stage?.name ?? "\u2014"
-    };
-  });
+    throw err;
+  }
+}
+var GOALS = ["live", "rent", "both"];
+async function qualifyLeadByKey(db2, key, input) {
+  const patch = {};
+  if (input.goal !== void 0) {
+    if (!GOALS.some((g) => g === input.goal)) throw new RangeError("goal must be live|rent|both");
+    patch.goal = input.goal;
+  }
+  for (const f of ["budget", "horizon"]) {
+    if (input[f] === void 0) continue;
+    const v = cleanStr(input[f], 100);
+    if (!v) throw new RangeError(`${f} must be a non-empty string`);
+    patch[f] = v;
+  }
+  if (!Object.keys(patch).length) throw new RangeError("nothing to save");
+  const [row] = await db2.select({ id: leads.id, qualification: leads.qualification }).from(leads).where(eq2(leads.idempotencyKey, key.slice(0, 80)));
+  if (!row) return null;
+  const merged = { ...row.qualification ?? {}, ...patch };
+  await db2.update(leads).set({ qualification: merged, updatedAt: /* @__PURE__ */ new Date() }).where(eq2(leads.id, row.id));
+  const parts = [
+    merged.goal && `\u0446\u0435\u043B\u044C: ${merged.goal}`,
+    merged.budget && `\u0431\u044E\u0434\u0436\u0435\u0442: ${merged.budget}`,
+    merged.horizon && `\u0433\u043E\u0440\u0438\u0437\u043E\u043D\u0442: ${merged.horizon}`
+  ].filter(Boolean);
+  await addNote(db2, row.id, `\u041A\u0432\u0430\u043B\u0438\u0444\u0438\u043A\u0430\u0446\u0438\u044F: ${parts.join(", ")}`);
+  return { leadId: row.id };
 }
 async function listLeads(db2, limit = 500) {
   const rows = await db2.select({
@@ -1323,13 +1429,13 @@ async function listLeads(db2, limit = 500) {
   }).from(leads).leftJoin(contacts, eq2(leads.contactId, contacts.id)).leftJoin(pipelines, eq2(leads.pipelineId, pipelines.id)).leftJoin(stages, eq2(leads.stageId, stages.id)).orderBy(desc(leads.createdAt)).limit(limit);
   const notesAgg = await db2.select({
     leadId: leadNotes.leadId,
-    text: sql`string_agg(${leadNotes.text}, ' ')`
+    text: sql2`string_agg(${leadNotes.text}, ' ')`
   }).from(leadNotes).groupBy(leadNotes.leadId);
   const notesByLead = new Map(notesAgg.map((n) => [n.leadId, (n.text || "").slice(0, 1500)]));
   const lastEvent = await db2.select({
     leadId: leadEvents.leadId,
-    last: sql`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} in ('created','stage'))`,
-    lastTouch: sql`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} = 'touch')`
+    last: sql2`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} in ('created','stage'))`,
+    lastTouch: sql2`max(${leadEvents.createdAt}) filter (where ${leadEvents.type} = 'touch')`
   }).from(leadEvents).groupBy(leadEvents.leadId);
   const stageSinceByLead = new Map(lastEvent.map((e) => [e.leadId, e.last]));
   const lastTouchByLead = new Map(lastEvent.map((e) => [e.leadId, e.lastTouch]));
@@ -1365,12 +1471,18 @@ async function getLead(db2, id) {
     source: leads.source,
     kind: leads.kind,
     tags: leads.tags,
+    intent: leads.intent,
+    attribution: leads.attribution,
+    qualification: leads.qualification,
     createdAt: leads.createdAt,
     updatedAt: leads.updatedAt,
     contactId: leads.contactId,
     contactName: contacts.firstName,
     email: contacts.email,
     phone: contacts.phone,
+    telegram: contacts.telegram,
+    whatsapp: contacts.whatsapp,
+    preferredChannel: contacts.preferredChannel,
     pipeline: pipelines.name,
     pipelineKey: pipelines.key,
     stage: stages.name,
@@ -1426,9 +1538,9 @@ async function setDealChecklistItem(db2, leadId, key, done) {
   await db2.update(leads).set({ dealChecklist: checklist, updatedAt: /* @__PURE__ */ new Date() }).where(eq2(leads.id, leadId));
   return checklist;
 }
-async function addNote(db2, leadId, text2) {
+async function addNote(db2, leadId, text2, sharedWithPartner = false) {
   if (!text2.trim()) return null;
-  const [n] = await db2.insert(leadNotes).values({ leadId, text: text2.trim() }).returning({ id: leadNotes.id });
+  const [n] = await db2.insert(leadNotes).values({ leadId, text: text2.trim(), sharedWithPartner }).returning({ id: leadNotes.id });
   await db2.update(leads).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq2(leads.id, leadId));
   return n;
 }
@@ -1452,9 +1564,9 @@ async function listContacts(db2, limit = 1e3) {
     email: contacts.email,
     phone: contacts.phone,
     createdAt: contacts.createdAt,
-    leadsCount: sql`count(${leads.id})::int`,
-    openLeads: sql`(count(${leads.id}) filter (where ${leads.status} = 'open'))::int`,
-    lastLeadId: sql`max(${leads.id})`
+    leadsCount: sql2`count(${leads.id})::int`,
+    openLeads: sql2`(count(${leads.id}) filter (where ${leads.status} = 'open'))::int`,
+    lastLeadId: sql2`max(${leads.id})`
   }).from(contacts).leftJoin(leads, eq2(leads.contactId, contacts.id)).groupBy(contacts.id).orderBy(asc(contacts.firstName), asc(contacts.id)).limit(limit);
 }
 async function mergeContacts(db2, keepId, mergeId) {
@@ -2014,7 +2126,7 @@ function formatPost(r) {
 }
 
 // src/lib/write.ts
-import { eq as eq5, sql as sql2 } from "drizzle-orm";
+import { eq as eq5, sql as sql3 } from "drizzle-orm";
 
 // src/lib/object-title.ts
 function seed(s) {
@@ -2846,7 +2958,7 @@ async function verifyLogin(db2, email, password) {
   if (!u2) return null;
   const ok = await bcrypt.compare(password, u2.passwordHash);
   if (!ok) return null;
-  return { id: u2.id, email: u2.email, name: u2.name, role: u2.role };
+  return { id: u2.id, email: u2.email, name: u2.name, role: u2.role, developer: u2.developer };
 }
 
 // src/lib/settings.ts
@@ -2979,7 +3091,7 @@ async function demandSummary(db2, windowDays = 90) {
 }
 
 // src/lib/views.ts
-import { eq as eq8, sql as sql3 } from "drizzle-orm";
+import { eq as eq8, sql as sql4 } from "drizzle-orm";
 function bangkokDay2(offsetDays = 0) {
   return new Date(Date.now() + 7 * 36e5 + offsetDays * 864e5).toISOString().slice(0, 10);
 }
@@ -2989,7 +3101,7 @@ async function trackView(db2, rwNumber, vid) {
   const day = bangkokDay2();
   await db2.insert(objectViewsDaily).values({ rwNumber, day, views: 1 }).onConflictDoUpdate({
     target: [objectViewsDaily.rwNumber, objectViewsDaily.day],
-    set: { views: sql3`${objectViewsDaily.views} + 1` }
+    set: { views: sql4`${objectViewsDaily.views} + 1` }
   });
   if (vid) {
     await db2.insert(objectViewVisitors).values({ rwNumber, vid: vid.slice(0, 40), day }).onConflictDoNothing();
@@ -3002,14 +3114,14 @@ async function viewsSummary(db2) {
   const [rows, uniqRows] = await Promise.all([
     db2.select({
       rwNumber: objectViewsDaily.rwNumber,
-      d7: sql3`coalesce(sum(${objectViewsDaily.views}) filter (where ${objectViewsDaily.day} >= ${from7}), 0)`,
-      d30: sql3`coalesce(sum(${objectViewsDaily.views}) filter (where ${objectViewsDaily.day} >= ${from30}), 0)`,
-      total: sql3`sum(${objectViewsDaily.views})`
+      d7: sql4`coalesce(sum(${objectViewsDaily.views}) filter (where ${objectViewsDaily.day} >= ${from7}), 0)`,
+      d30: sql4`coalesce(sum(${objectViewsDaily.views}) filter (where ${objectViewsDaily.day} >= ${from30}), 0)`,
+      total: sql4`sum(${objectViewsDaily.views})`
     }).from(objectViewsDaily).groupBy(objectViewsDaily.rwNumber),
     db2.select({
       rwNumber: objectViewVisitors.rwNumber,
-      uniques30: sql3`count(distinct ${objectViewVisitors.vid})`
-    }).from(objectViewVisitors).where(sql3`${objectViewVisitors.day} >= ${from30}`).groupBy(objectViewVisitors.rwNumber)
+      uniques30: sql4`count(distinct ${objectViewVisitors.vid})`
+    }).from(objectViewVisitors).where(sql4`${objectViewVisitors.day} >= ${from30}`).groupBy(objectViewVisitors.rwNumber)
   ]);
   const uniqByRw = new Map(uniqRows.map((u2) => [u2.rwNumber, Number(u2.uniques30)]));
   return rows.map((r) => ({
@@ -3022,12 +3134,12 @@ async function viewsSummary(db2) {
 }
 async function crossShopperCount(db2) {
   const from30 = bangkokDay2(-29);
-  const rows = await db2.select({ vid: objectViewVisitors.vid }).from(objectViewVisitors).where(sql3`${objectViewVisitors.day} >= ${from30}`).groupBy(objectViewVisitors.vid).having(sql3`count(distinct ${objectViewVisitors.rwNumber}) >= 2`);
+  const rows = await db2.select({ vid: objectViewVisitors.vid }).from(objectViewVisitors).where(sql4`${objectViewVisitors.day} >= ${from30}`).groupBy(objectViewVisitors.vid).having(sql4`count(distinct ${objectViewVisitors.rwNumber}) >= 2`);
   return rows.length;
 }
 
 // src/lib/events.ts
-import { eq as eq9, sql as sql4, and as and4, desc as desc2, lte } from "drizzle-orm";
+import { eq as eq9, sql as sql5, and as and4, desc as desc2, lte } from "drizzle-orm";
 var SITE = "__site__";
 var OBJECT_KINDS = /* @__PURE__ */ new Set([
   "wa_click",
@@ -3074,7 +3186,7 @@ async function trackEvent(db2, rwNumber, kind, vid) {
   }
   await db2.insert(objectEventsDaily).values({ rwNumber: rw, kind, day: bangkokDay3(), count: 1 }).onConflictDoUpdate({
     target: [objectEventsDaily.rwNumber, objectEventsDaily.kind, objectEventsDaily.day],
-    set: { count: sql4`${objectEventsDaily.count} + 1` }
+    set: { count: sql5`${objectEventsDaily.count} + 1` }
   });
   const v = (vid || "").trim().slice(0, 64);
   if (v && JOURNEY_KINDS.has(kind)) {
@@ -3088,8 +3200,8 @@ async function eventsSummary(db2) {
   const rows = await db2.select({
     rwNumber: objectEventsDaily.rwNumber,
     kind: objectEventsDaily.kind,
-    d7: sql4`coalesce(sum(${objectEventsDaily.count}) filter (where ${objectEventsDaily.day} >= ${from7}), 0)`,
-    d30: sql4`coalesce(sum(${objectEventsDaily.count}) filter (where ${objectEventsDaily.day} >= ${from30}), 0)`
+    d7: sql5`coalesce(sum(${objectEventsDaily.count}) filter (where ${objectEventsDaily.day} >= ${from7}), 0)`,
+    d30: sql5`coalesce(sum(${objectEventsDaily.count}) filter (where ${objectEventsDaily.day} >= ${from30}), 0)`
   }).from(objectEventsDaily).groupBy(objectEventsDaily.rwNumber, objectEventsDaily.kind);
   return rows.map((r) => ({ rwNumber: r.rwNumber, kind: r.kind, d7: Number(r.d7), d30: Number(r.d30) }));
 }
@@ -3098,7 +3210,7 @@ async function trackReferral(db2, source) {
   if (!s) return false;
   await db2.insert(referralsDaily).values({ source: s, day: bangkokDay3(), count: 1 }).onConflictDoUpdate({
     target: [referralsDaily.source, referralsDaily.day],
-    set: { count: sql4`${referralsDaily.count} + 1` }
+    set: { count: sql5`${referralsDaily.count} + 1` }
   });
   return true;
 }
@@ -3108,7 +3220,7 @@ async function trackAiCitation(db2, source, path) {
   if (!s.startsWith("ai:") || !p.startsWith("/")) return false;
   await db2.insert(aiCitations).values({ source: s, path: p, day: bangkokDay3(), count: 1 }).onConflictDoUpdate({
     target: [aiCitations.source, aiCitations.path, aiCitations.day],
-    set: { count: sql4`${aiCitations.count} + 1` }
+    set: { count: sql5`${aiCitations.count} + 1` }
   });
   return true;
 }
@@ -3118,9 +3230,9 @@ async function aiCitationsSummary(db2) {
   const rows = await db2.select({
     path: aiCitations.path,
     source: aiCitations.source,
-    d7: sql4`coalesce(sum(${aiCitations.count}) filter (where ${aiCitations.day} >= ${from7}), 0)`,
-    d30: sql4`coalesce(sum(${aiCitations.count}) filter (where ${aiCitations.day} >= ${from30}), 0)`
-  }).from(aiCitations).where(sql4`${aiCitations.day} >= ${from30}`).groupBy(aiCitations.path, aiCitations.source);
+    d7: sql5`coalesce(sum(${aiCitations.count}) filter (where ${aiCitations.day} >= ${from7}), 0)`,
+    d30: sql5`coalesce(sum(${aiCitations.count}) filter (where ${aiCitations.day} >= ${from30}), 0)`
+  }).from(aiCitations).where(sql5`${aiCitations.day} >= ${from30}`).groupBy(aiCitations.path, aiCitations.source);
   const byPath = /* @__PURE__ */ new Map();
   for (const r of rows) {
     const cur = byPath.get(r.path) ?? { path: r.path, d7: 0, d30: 0, sources: [] };
@@ -3136,9 +3248,9 @@ async function referralsSummary(db2) {
   const from30 = bangkokDay3(-29);
   const rows = await db2.select({
     source: referralsDaily.source,
-    d7: sql4`coalesce(sum(${referralsDaily.count}) filter (where ${referralsDaily.day} >= ${from7}), 0)`,
-    d30: sql4`coalesce(sum(${referralsDaily.count}) filter (where ${referralsDaily.day} >= ${from30}), 0)`
-  }).from(referralsDaily).where(sql4`${referralsDaily.day} >= ${from30}`).groupBy(referralsDaily.source);
+    d7: sql5`coalesce(sum(${referralsDaily.count}) filter (where ${referralsDaily.day} >= ${from7}), 0)`,
+    d30: sql5`coalesce(sum(${referralsDaily.count}) filter (where ${referralsDaily.day} >= ${from30}), 0)`
+  }).from(referralsDaily).where(sql5`${referralsDaily.day} >= ${from30}`).groupBy(referralsDaily.source);
   return rows.map((r) => ({ source: r.source, d7: Number(r.d7), d30: Number(r.d30) })).sort((a, b) => b.d30 - a.d30);
 }
 async function journeySummary(db2, limit = 30) {
@@ -3199,7 +3311,7 @@ var ACTION_WEIGHTS = {
   contact_reach: 2
 };
 async function hotOpenLeads(db2, limit = 12) {
-  const open = await db2.select({ id: leads.id, name: leads.name, createdAt: leads.createdAt, rwNumber: leads.rwNumber, vid: leads.vid }).from(leads).where(and4(eq9(leads.status, "open"), sql4`${leads.vid} is not null`)).orderBy(desc2(leads.createdAt)).limit(200);
+  const open = await db2.select({ id: leads.id, name: leads.name, createdAt: leads.createdAt, rwNumber: leads.rwNumber, vid: leads.vid }).from(leads).where(and4(eq9(leads.status, "open"), sql5`${leads.vid} is not null`)).orderBy(desc2(leads.createdAt)).limit(200);
   const out = [];
   for (const l of open) {
     const vid = l.vid;
@@ -3235,8 +3347,8 @@ async function hotOpenLeads(db2, limit = 12) {
 }
 async function returningVisitors(db2, windowDays = 60) {
   const since = bangkokDay3(-(windowDays - 1));
-  const rows = await db2.select({ vid: objectViewVisitors.vid, rw: objectViewVisitors.rwNumber, day: objectViewVisitors.day }).from(objectViewVisitors).where(sql4`${objectViewVisitors.day} >= ${since}`);
-  const leadVidRows = await db2.select({ vid: leads.vid }).from(leads).where(sql4`${leads.vid} is not null`);
+  const rows = await db2.select({ vid: objectViewVisitors.vid, rw: objectViewVisitors.rwNumber, day: objectViewVisitors.day }).from(objectViewVisitors).where(sql5`${objectViewVisitors.day} >= ${since}`);
+  const leadVidRows = await db2.select({ vid: leads.vid }).from(leads).where(sql5`${leads.vid} is not null`);
   const leadVids = new Set(leadVidRows.map((l) => l.vid));
   const byVid = /* @__PURE__ */ new Map();
   for (const r of rows) {
@@ -3276,7 +3388,7 @@ async function aiCitationsTrend(db2, windowDays = 56) {
   const since = bangkokDay3(-(windowDays - 1));
   const from7 = bangkokDay3(-6);
   const from30 = bangkokDay3(-29);
-  const rows = await db2.select({ source: aiCitations.source, day: aiCitations.day, count: aiCitations.count }).from(aiCitations).where(sql4`${aiCitations.day} >= ${since}`);
+  const rows = await db2.select({ source: aiCitations.source, day: aiCitations.day, count: aiCitations.count }).from(aiCitations).where(sql5`${aiCitations.day} >= ${since}`);
   const weekly = /* @__PURE__ */ new Map();
   const bySource = /* @__PURE__ */ new Map();
   let total7 = 0;
@@ -3306,7 +3418,7 @@ async function aiCitationsTrend(db2, windowDays = 56) {
 }
 
 // src/lib/metrics.ts
-import { sql as sql5, inArray as inArray2 } from "drizzle-orm";
+import { sql as sql6, inArray as inArray2 } from "drizzle-orm";
 function bangkokDay4(offsetDays = 0) {
   return new Date(Date.now() + offsetDays * 864e5 + 7 * 36e5).toISOString().slice(0, 10);
 }
@@ -3314,13 +3426,13 @@ var ENGAGEMENT_KINDS = ["wa_click", "tg_click", "phone_click", "email_click", "s
 async function metricsSeries(db2, days = 56) {
   const from = bangkokDay4(-(days - 1));
   const [views, eng, refs, lds] = await Promise.all([
-    db2.select({ day: objectViewsDaily.day, n: sql5`sum(${objectViewsDaily.views})` }).from(objectViewsDaily).where(sql5`${objectViewsDaily.day} >= ${from}`).groupBy(objectViewsDaily.day),
-    db2.select({ day: objectEventsDaily.day, n: sql5`sum(${objectEventsDaily.count})` }).from(objectEventsDaily).where(sql5`${objectEventsDaily.day} >= ${from} and ${inArray2(objectEventsDaily.kind, ENGAGEMENT_KINDS)}`).groupBy(objectEventsDaily.day),
-    db2.select({ day: referralsDaily.day, n: sql5`sum(${referralsDaily.count})` }).from(referralsDaily).where(sql5`${referralsDaily.day} >= ${from}`).groupBy(referralsDaily.day),
+    db2.select({ day: objectViewsDaily.day, n: sql6`sum(${objectViewsDaily.views})` }).from(objectViewsDaily).where(sql6`${objectViewsDaily.day} >= ${from}`).groupBy(objectViewsDaily.day),
+    db2.select({ day: objectEventsDaily.day, n: sql6`sum(${objectEventsDaily.count})` }).from(objectEventsDaily).where(sql6`${objectEventsDaily.day} >= ${from} and ${inArray2(objectEventsDaily.kind, ENGAGEMENT_KINDS)}`).groupBy(objectEventsDaily.day),
+    db2.select({ day: referralsDaily.day, n: sql6`sum(${referralsDaily.count})` }).from(referralsDaily).where(sql6`${referralsDaily.day} >= ${from}`).groupBy(referralsDaily.day),
     db2.select({
-      day: sql5`to_char(${leads.createdAt} at time zone 'Asia/Bangkok', 'YYYY-MM-DD')`,
-      n: sql5`count(*)`
-    }).from(leads).groupBy(sql5`1`)
+      day: sql6`to_char(${leads.createdAt} at time zone 'Asia/Bangkok', 'YYYY-MM-DD')`,
+      n: sql6`count(*)`
+    }).from(leads).groupBy(sql6`1`)
   ]);
   const map = (rows) => new Map(rows.map((r) => [r.day, Number(r.n)]));
   const vMap = map(views);
@@ -3342,7 +3454,7 @@ async function metricsSeries(db2, days = 56) {
 }
 
 // src/lib/articles.ts
-import { eq as eq10, and as and5, desc as desc3, sql as sql6, inArray as inArray3 } from "drizzle-orm";
+import { eq as eq10, and as and5, desc as desc3, sql as sql7, inArray as inArray3 } from "drizzle-orm";
 var ArticleInputError = class extends Error {
 };
 var STATUSES = ["pending", "published", "rejected"];
@@ -3365,7 +3477,7 @@ async function createArticle(db2, input) {
   const existing = await db2.select({ slug: articles.slug }).from(articles).where(
     and5(
       eq10(articles.lang, lang),
-      sql6`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
+      sql7`(${articles.slug} = ${slug} OR ${articles.slug} LIKE ${slug + "-%"})`
     )
   );
   if (existing.some((r) => r.slug === slug)) {
@@ -3392,7 +3504,7 @@ async function listArticles(db2, opts = {}) {
   const conds = [];
   if (opts.status) conds.push(eq10(articles.status, opts.status));
   if (opts.lang) conds.push(eq10(articles.lang, opts.lang));
-  return db2.select().from(articles).where(conds.length ? and5(...conds) : void 0).orderBy(desc3(sql6`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
+  return db2.select().from(articles).where(conds.length ? and5(...conds) : void 0).orderBy(desc3(sql7`coalesce(${articles.publishedAt}, ${articles.createdAt})`)).limit(opts.limit ?? 200);
 }
 async function getArticleById(db2, id) {
   const [row] = await db2.select().from(articles).where(eq10(articles.id, id)).limit(1);
@@ -3407,7 +3519,7 @@ async function getArticleBySlug(db2, slug, lang) {
 async function countPending(db2, lang) {
   const conds = [eq10(articles.status, "pending")];
   if (lang) conds.push(eq10(articles.lang, lang));
-  const [r] = await db2.select({ n: sql6`count(*)::int` }).from(articles).where(and5(...conds));
+  const [r] = await db2.select({ n: sql7`count(*)::int` }).from(articles).where(and5(...conds));
   return r?.n ?? 0;
 }
 async function updateArticle(db2, id, patch) {
@@ -3570,7 +3682,7 @@ async function getSessionById(db2, id) {
 import { and as and8, desc as desc6, eq as eq13 } from "drizzle-orm";
 
 // src/lib/ratelimit.ts
-import { sql as sql7 } from "drizzle-orm";
+import { sql as sql8 } from "drizzle-orm";
 import { lt } from "drizzle-orm";
 async function checkRateLimit(db2, key, limit, windowSec) {
   const now = Date.now();
@@ -3578,7 +3690,7 @@ async function checkRateLimit(db2, key, limit, windowSec) {
   const windowStart = new Date(Math.floor(now / windowMs) * windowMs);
   const [row] = await db2.insert(rateLimits).values({ key, windowStart, count: 1 }).onConflictDoUpdate({
     target: [rateLimits.key, rateLimits.windowStart],
-    set: { count: sql7`${rateLimits.count} + 1` }
+    set: { count: sql8`${rateLimits.count} + 1` }
   }).returning({ count: rateLimits.count });
   const count = row?.count ?? 1;
   if (Math.random() < 0.01) {
@@ -4260,10 +4372,21 @@ app.post("/leads", async (c) => {
   try {
     const input = await c.req.json();
     const res = await createLead(db, input);
-    return c.json(res, 201);
+    return c.json(res, res.duplicate ? 200 : 201);
   } catch (err) {
     console.error("[POST /leads]", err);
     return c.json({ error: "create lead failed" }, 500);
+  }
+});
+app.patch("/leads/by-key/:key/qualification", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const res = await qualifyLeadByKey(db, c.req.param("key"), body ?? {});
+    return res ? c.json({ ok: true, leadId: res.leadId }) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    if (err instanceof RangeError) return c.json({ error: err.message }, 400);
+    console.error("[PATCH /leads/by-key/:key/qualification]", err);
+    return c.json({ error: "qualification failed" }, 500);
   }
 });
 app.get("/leads", async (c) => {
@@ -4328,8 +4451,8 @@ app.delete("/leads/:id", async (c) => {
   }
 });
 app.post("/leads/:id/notes", async (c) => {
-  const { text: text2 } = await c.req.json();
-  const res = await addNote(db, Number(c.req.param("id")), String(text2 ?? ""));
+  const { text: text2, sharedWithPartner } = await c.req.json();
+  const res = await addNote(db, Number(c.req.param("id")), String(text2 ?? ""), sharedWithPartner === true);
   return res ? c.json(res, 201) : c.json({ error: "empty note" }, 400);
 });
 app.post("/leads/:id/tasks", async (c) => {
