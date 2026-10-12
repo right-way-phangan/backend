@@ -13,7 +13,7 @@
  */
 import { eq, and, desc } from "drizzle-orm";
 import { agentTasks, councilSessions } from "../db/schema";
-import type { AgentTaskRow, CouncilSessionRow } from "../db/schema";
+import type { AgentTaskRow, CouncilAgentState, CouncilSessionRow } from "../db/schema";
 import type { AnyPgDatabase } from "./load";
 
 export class AgentTaskInputError extends Error {}
@@ -100,8 +100,22 @@ export interface CouncilSessionInputDTO {
   question: string;
   answer: string;
   source?: string; // advice | task
-  status?: "done" | "error";
+  status?: "done" | "error" | "processing"; // processing — бот завёл сессию ДО ответа
   errorText?: string;
+}
+
+const AGENT_STATUSES = new Set(["pending", "working", "done", "error"]);
+
+/** agents из бота: [{id:"rw-…", status}] — иначе 400 (мусор в мир Древа не пускаем). */
+function parseAgents(raw: unknown): CouncilAgentState[] {
+  if (!Array.isArray(raw)) throw new AgentTaskInputError("agents must be an array");
+  return raw.map((a) => {
+    const id = String(a?.id ?? "").trim();
+    const status = String(a?.status ?? "");
+    if (!/^rw-[a-z-]+$/.test(id) || !AGENT_STATUSES.has(status))
+      throw new AgentTaskInputError("agents[]: {id: rw-…, status: pending|working|done|error}");
+    return { id, status: status as CouncilAgentState["status"] };
+  });
 }
 
 /** Готовый совет (бот из Telegram пишет сразу с ответом → status=done). */
@@ -111,10 +125,11 @@ export async function createSession(
 ): Promise<CouncilSessionRow> {
   const question = String(input.question ?? "").trim();
   const answer = String(input.answer ?? "").trim();
-  if (!question || !answer) throw new AgentTaskInputError("question and answer are required");
-  if (input.status !== undefined && input.status !== "done" && input.status !== "error")
-    throw new AgentTaskInputError("status must be done or error");
   const status = input.status ?? "done";
+  if (status !== "done" && status !== "error" && status !== "processing")
+    throw new AgentTaskInputError("status must be done, error or processing");
+  if (!question || (!answer && status !== "processing"))
+    throw new AgentTaskInputError("question and answer are required");
   const [row] = await db
     .insert(councilSessions)
     .values({
@@ -123,7 +138,7 @@ export async function createSession(
       source: input.source?.trim() || "advice",
       status,
       errorText: status === "error" ? String(input.errorText || answer).slice(0, 600) : null,
-      answeredAt: new Date(),
+      answeredAt: status === "processing" ? null : new Date(),
     })
     .returning();
   return row;
@@ -148,6 +163,7 @@ export interface CouncilSessionPatchDTO {
   status?: string; // pending | processing | done | error
   answer?: string;
   errorText?: string | null;
+  agents?: unknown; // [{id, status}] — кого позвал Зевс (см. schema)
 }
 
 /** Бот: claim (status=processing) и завершение (answer+done / error). */
@@ -163,6 +179,7 @@ export async function updateSession(
   }
   if (patch.answer !== undefined) set.answer = patch.answer;
   if (patch.errorText !== undefined) set.errorText = patch.errorText;
+  if (patch.agents !== undefined) set.agents = parseAgents(patch.agents);
   if (Object.keys(set).length === 0) return getSessionById(db, id);
   const [row] = await db
     .update(councilSessions)

@@ -626,6 +626,10 @@ var councilSessions = pgTable(
     status: text("status").notNull().default("done"),
     errorText: text("error_text"),
     // если status=error
+    // Кого Зевс позвал: [{id:"rw-strategy",status:"pending|working|done|error"}, …,
+    // {id:"rw-critic",…}]. Бот пишет сразу после выбора отделов и обновляет по ходу
+    // разбора (читает Великое Древо). null — старые сессии / single-pass без роутера.
+    agents: jsonb("agents").$type(),
     answeredAt: timestamp("answered_at", { withTimezone: true }),
     // когда лёг ответ
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
@@ -3635,20 +3639,32 @@ async function deleteTask(db2, id) {
   const res = await db2.delete(agentTasks).where(eq12(agentTasks.id, id)).returning({ id: agentTasks.id });
   return res.length > 0;
 }
+var AGENT_STATUSES = /* @__PURE__ */ new Set(["pending", "working", "done", "error"]);
+function parseAgents(raw) {
+  if (!Array.isArray(raw)) throw new AgentTaskInputError("agents must be an array");
+  return raw.map((a) => {
+    const id = String(a?.id ?? "").trim();
+    const status = String(a?.status ?? "");
+    if (!/^rw-[a-z-]+$/.test(id) || !AGENT_STATUSES.has(status))
+      throw new AgentTaskInputError("agents[]: {id: rw-\u2026, status: pending|working|done|error}");
+    return { id, status };
+  });
+}
 async function createSession(db2, input) {
   const question = String(input.question ?? "").trim();
   const answer = String(input.answer ?? "").trim();
-  if (!question || !answer) throw new AgentTaskInputError("question and answer are required");
-  if (input.status !== void 0 && input.status !== "done" && input.status !== "error")
-    throw new AgentTaskInputError("status must be done or error");
   const status = input.status ?? "done";
+  if (status !== "done" && status !== "error" && status !== "processing")
+    throw new AgentTaskInputError("status must be done, error or processing");
+  if (!question || !answer && status !== "processing")
+    throw new AgentTaskInputError("question and answer are required");
   const [row] = await db2.insert(councilSessions).values({
     question,
     answer,
     source: input.source?.trim() || "advice",
     status,
     errorText: status === "error" ? String(input.errorText || answer).slice(0, 600) : null,
-    answeredAt: /* @__PURE__ */ new Date()
+    answeredAt: status === "processing" ? null : /* @__PURE__ */ new Date()
   }).returning();
   return row;
 }
@@ -3666,6 +3682,7 @@ async function updateSession(db2, id, patch) {
   }
   if (patch.answer !== void 0) set.answer = patch.answer;
   if (patch.errorText !== void 0) set.errorText = patch.errorText;
+  if (patch.agents !== void 0) set.agents = parseAgents(patch.agents);
   if (Object.keys(set).length === 0) return getSessionById(db2, id);
   const [row] = await db2.update(councilSessions).set(set).where(patch.status === "processing" ? and7(eq12(councilSessions.id, id), eq12(councilSessions.status, "pending")) : eq12(councilSessions.id, id)).returning();
   return row ?? null;
@@ -4662,6 +4679,7 @@ app.patch("/council-sessions/:id", async (c) => {
     const res = await updateSession(db, id, await c.req.json());
     return res ? c.json(res) : c.json({ error: "not found" }, 404);
   } catch (err) {
+    if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
     console.error("[PATCH /council-sessions]", err);
     return c.json({ error: "update failed" }, 500);
   }

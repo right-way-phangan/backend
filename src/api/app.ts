@@ -857,7 +857,8 @@ app.get("/council-sessions/:id", async (c) => {
   return row ? c.json(row) : c.json({ error: "not found" }, 404);
 });
 
-/** Сохранить готовый совет (бот после /совет в Telegram → status=done). */
+/** Сохранить совет: готовый (status=done) или заведённый до ответа (status=processing,
+ *  answer пустой — дальше PATCH agents/answer). */
 app.post("/council-sessions", async (c) => {
   try {
     const res = await createSession(db, await c.req.json());
@@ -890,6 +891,7 @@ app.patch("/council-sessions/:id", async (c) => {
     const res = await updateSession(db, id, await c.req.json());
     return res ? c.json(res) : c.json({ error: "not found" }, 404);
   } catch (err) {
+    if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
     console.error("[PATCH /council-sessions]", err);
     return c.json({ error: "update failed" }, 500);
   }
