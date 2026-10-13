@@ -4851,6 +4851,20 @@ app.post("/council-actions/:id/decide", async (c) => {
     return c.json({ error: "decide failed" }, 500);
   }
 });
+app.get("/finance/summary", async (c) => {
+  const site = process.env.SITE_URL ?? "https://rightwaygroup.co";
+  try {
+    const res = await fetch(`${site}/api/finance-summary`, {
+      headers: { authorization: `Bearer ${API_TOKEN ?? ""}` },
+      signal: AbortSignal.timeout(15e3)
+    });
+    if (!res.ok) return c.json({ error: `site ${res.status}` }, 502);
+    return c.json(await res.json());
+  } catch (err) {
+    console.error("[GET /finance/summary]", err);
+    return c.json({ error: "site unreachable" }, 502);
+  }
+});
 app.get("/valuation/factors", async (c) => {
   const rows = await listFactorOverrides(db);
   return c.json(rows);

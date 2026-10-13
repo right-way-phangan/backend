@@ -946,6 +946,24 @@ app.post("/council-actions/:id/decide", async (c) => {
   }
 });
 
+// ─── Расходы месяца (только чтение) — Плутос в «Великом Древе» ───
+// Таблицу финансов читает только сайт, поэтому расчёт живёт там (/api/finance-summary,
+// те же функции, что /admin/finance), а здесь — прокси тем же секретом site↔backend.
+app.get("/finance/summary", async (c) => {
+  const site = process.env.SITE_URL ?? "https://rightwaygroup.co";
+  try {
+    const res = await fetch(`${site}/api/finance-summary`, {
+      headers: { authorization: `Bearer ${API_TOKEN ?? ""}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return c.json({ error: `site ${res.status}` }, 502);
+    return c.json(await res.json());
+  } catch (err) {
+    console.error("[GET /finance/summary]", err);
+    return c.json({ error: "site unreachable" }, 502);
+  }
+});
+
 // ---- «RW Оценка» — состояние оценщика (движок считает в web) ----
 
 /** Переопределения коэффициентов (пусто = дефолты движка). */
