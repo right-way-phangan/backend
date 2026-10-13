@@ -759,7 +759,7 @@ export const councilSessions = pgTable(
     // бот считает; error = упал. Локальный claude-«мозг» обрабатывает pending.
     status: text("status").notNull().default("done"),
     errorText: text("error_text"), // если status=error
-    // Кого Зевс позвал: [{id:"rw-strategy",status:"pending|working|done|error"}, …,
+    // Кого Зевс позвал: [{id:"rw-strategy",task,status:"pending|working|done|failed",part}, …,
     // {id:"rw-critic",…}]. Бот пишет сразу после выбора отделов и обновляет по ходу
     // разбора (читает Великое Древо). null — старые сессии / single-pass без роутера.
     agents: jsonb("agents").$type<CouncilAgentState[]>(),
@@ -772,8 +772,39 @@ export const councilSessions = pgTable(
   }),
 );
 
-export type CouncilAgentState = { id: string; status: "pending" | "working" | "done" | "error" };
+// error — старое имя failed (сессии до 2026-10-13), принимаем оба.
+export type CouncilAgentState = {
+  id: string;
+  task?: string; // что Зевс поручил богу
+  status: "pending" | "working" | "done" | "failed" | "error";
+  part?: string; // позиция бога, когда ответил
+};
 export type CouncilSessionRow = typeof councilSessions.$inferSelect;
+
+// Действия совета под гейтом (follow-up лиду, пост EN+RU, трата, деплой, задача):
+// сначала строка proposed, решение «Да/Нет» — из бота или из Великого Древа через
+// POST /council-actions/:id/decide (один путь исполнения). См. lib/council-actions.ts.
+export const councilActions = pgTable(
+  "council_actions",
+  {
+    id: serial("id").primaryKey(),
+    sessionId: integer("session_id"), // совет, из которого действие (null — команда бота)
+    agentId: text("agent_id").notNull(), // rw-sales, rw-marketing, …
+    type: text("type").notNull(), // followup | dd | post | task | expense | deploy
+    title: text("title").notNull(), // коротко, по-русски
+    payload: jsonb("payload").notNull().default({}), // что нужно для исполнения
+    status: text("status").notNull().default("proposed"), // proposed | done | rejected | failed
+    result: text("result"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Ставится claim-ом в момент решения: второй decide не пройдёт, пока идёт исполнение.
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => ({
+    statusIdx: index("council_actions_status_idx").on(t.status),
+  }),
+);
+
+export type CouncilActionRow = typeof councilActions.$inferSelect;
 
 /**
  * Idempotency guard for the webhook: Telegram redelivers the same update_id if

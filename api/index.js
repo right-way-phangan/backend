@@ -26,6 +26,7 @@ __export(schema_exports, {
   contactMessages: () => contactMessages,
   contactThreads: () => contactThreads,
   contacts: () => contacts,
+  councilActions: () => councilActions,
   councilSessions: () => councilSessions,
   leadEvents: () => leadEvents,
   leadNotes: () => leadNotes,
@@ -626,7 +627,7 @@ var councilSessions = pgTable(
     status: text("status").notNull().default("done"),
     errorText: text("error_text"),
     // если status=error
-    // Кого Зевс позвал: [{id:"rw-strategy",status:"pending|working|done|error"}, …,
+    // Кого Зевс позвал: [{id:"rw-strategy",task,status:"pending|working|done|failed",part}, …,
     // {id:"rw-critic",…}]. Бот пишет сразу после выбора отделов и обновляет по ходу
     // разбора (читает Великое Древо). null — старые сессии / single-pass без роутера.
     agents: jsonb("agents").$type(),
@@ -637,6 +638,31 @@ var councilSessions = pgTable(
   (t) => ({
     createdIdx: index("council_sessions_created_idx").on(t.createdAt),
     statusIdx: index("council_sessions_status_idx").on(t.status)
+  })
+);
+var councilActions = pgTable(
+  "council_actions",
+  {
+    id: serial("id").primaryKey(),
+    sessionId: integer("session_id"),
+    // совет, из которого действие (null — команда бота)
+    agentId: text("agent_id").notNull(),
+    // rw-sales, rw-marketing, …
+    type: text("type").notNull(),
+    // followup | dd | post | task | expense | deploy
+    title: text("title").notNull(),
+    // коротко, по-русски
+    payload: jsonb("payload").notNull().default({}),
+    // что нужно для исполнения
+    status: text("status").notNull().default("proposed"),
+    // proposed | done | rejected | failed
+    result: text("result"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Ставится claim-ом в момент решения: второй decide не пройдёт, пока идёт исполнение.
+    decidedAt: timestamp("decided_at", { withTimezone: true })
+  },
+  (t) => ({
+    statusIdx: index("council_actions_status_idx").on(t.status)
   })
 );
 var processedUpdates = pgTable("processed_updates", {
@@ -2563,17 +2589,17 @@ function sanitizePolygon(raw) {
 }
 function sanitizeConstructionUpdates(raw) {
   if (!Array.isArray(raw)) return void 0;
-  const str = (v) => typeof v === "string" ? v.trim() : "";
+  const str2 = (v) => typeof v === "string" ? v.trim() : "";
   const out = raw.flatMap((u2) => {
     if (!u2 || typeof u2 !== "object") return [];
     const r = u2;
-    const photos = (Array.isArray(r.photos) ? r.photos : []).map(str).filter((p) => /^https?:\/\//i.test(p));
-    if (photos.length === 0 && !str(r.date) && !str(r.note) && !str(r.noteRu)) return [];
+    const photos = (Array.isArray(r.photos) ? r.photos : []).map(str2).filter((p) => /^https?:\/\//i.test(p));
+    if (photos.length === 0 && !str2(r.date) && !str2(r.note) && !str2(r.noteRu)) return [];
     return [{
-      date: str(r.date),
-      dateRu: str(r.dateRu) || void 0,
-      note: str(r.note) || void 0,
-      noteRu: str(r.noteRu) || void 0,
+      date: str2(r.date),
+      dateRu: str2(r.dateRu) || void 0,
+      note: str2(r.note) || void 0,
+      noteRu: str2(r.noteRu) || void 0,
       photos
     }];
   });
@@ -3639,15 +3665,18 @@ async function deleteTask(db2, id) {
   const res = await db2.delete(agentTasks).where(eq12(agentTasks.id, id)).returning({ id: agentTasks.id });
   return res.length > 0;
 }
-var AGENT_STATUSES = /* @__PURE__ */ new Set(["pending", "working", "done", "error"]);
+var AGENT_STATUSES = /* @__PURE__ */ new Set(["pending", "working", "done", "failed", "error"]);
 function parseAgents(raw) {
   if (!Array.isArray(raw)) throw new AgentTaskInputError("agents must be an array");
   return raw.map((a) => {
     const id = String(a?.id ?? "").trim();
     const status = String(a?.status ?? "");
     if (!/^rw-[a-z-]+$/.test(id) || !AGENT_STATUSES.has(status))
-      throw new AgentTaskInputError("agents[]: {id: rw-\u2026, status: pending|working|done|error}");
-    return { id, status };
+      throw new AgentTaskInputError("agents[]: {id: rw-\u2026, status: pending|working|done|failed}");
+    const out = { id, status };
+    if (typeof a.task === "string" && a.task.trim()) out.task = a.task.trim().slice(0, 300);
+    if (typeof a.part === "string" && a.part.trim()) out.part = a.part.trim().slice(0, 8e3);
+    return out;
   });
 }
 async function createSession(db2, input) {
@@ -3695,8 +3724,111 @@ async function getSessionById(db2, id) {
   return row ?? null;
 }
 
+// src/lib/council-actions.ts
+import { randomBytes } from "node:crypto";
+import { and as and8, desc as desc6, eq as eq13, isNull } from "drizzle-orm";
+var CouncilActionError = class extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+  }
+  code;
+};
+var BOT_ONLY = /* @__PURE__ */ new Set(["expense", "deploy"]);
+var STATUSES3 = ["proposed", "done", "rejected", "failed"];
+async function createAction(db2, input) {
+  const agentId = String(input.agentId ?? "").trim();
+  const type = String(input.type ?? "").trim();
+  const title = String(input.title ?? "").trim();
+  if (!/^rw-[a-z-]+$/.test(agentId) || !type || !title)
+    throw new CouncilActionError("agentId (rw-\u2026), type \u0438 title \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B", 400);
+  const [row] = await db2.insert(councilActions).values({
+    sessionId: Number.isInteger(input.sessionId) ? input.sessionId : null,
+    agentId,
+    type,
+    title: title.slice(0, 200),
+    payload: input.payload && typeof input.payload === "object" ? input.payload : {}
+  }).returning();
+  return row;
+}
+async function listActions(db2, opts = {}) {
+  if (opts.status && !STATUSES3.includes(opts.status))
+    throw new CouncilActionError(`status: ${STATUSES3.join("|")}`, 400);
+  return db2.select().from(councilActions).where(opts.status ? eq13(councilActions.status, opts.status) : void 0).orderBy(desc6(councilActions.createdAt)).limit(opts.limit ?? 50);
+}
+async function getActionById(db2, id) {
+  const [row] = await db2.select().from(councilActions).where(eq13(councilActions.id, id)).limit(1);
+  return row ?? null;
+}
+var str = (v) => typeof v === "string" ? v.trim() : "";
+async function execute(db2, row) {
+  const p = row.payload ?? {};
+  switch (row.type) {
+    case "followup":
+    case "dd": {
+      const leadId = Number(p.leadId);
+      const text2 = str(p.text);
+      if (!Number.isInteger(leadId) || !text2) throw new Error("\u0432 payload \u043D\u0435\u0442 leadId/text");
+      const head = row.type === "dd" ? "\u2696\uFE0F DD-\u0432\u0435\u0440\u0434\u0438\u043A\u0442 \u043F\u043E \u0441\u0434\u0435\u043B\u043A\u0435 (\u0424\u0435\u043C\u0438\u0434\u0430):" : "\u270D\uFE0F \u0427\u0435\u0440\u043D\u043E\u0432\u0438\u043A follow-up (\u041A\u0430\u0439\u0440\u043E\u0441), \u043E\u0442\u043F\u0440\u0430\u0432\u0438\u0442\u044C \u043B\u0438\u0434\u0443 \u0432\u0440\u0443\u0447\u043D\u0443\u044E:";
+      const note = await addNote(db2, leadId, `${head}
+
+${text2}`);
+      if (!note) throw new Error("\u0437\u0430\u043C\u0435\u0442\u043A\u0430 \u043D\u0435 \u0437\u0430\u043F\u0438\u0441\u0430\u043B\u0430\u0441\u044C");
+      return row.type === "dd" ? `DD-\u0432\u0435\u0440\u0434\u0438\u043A\u0442 \u0441\u043E\u0445\u0440\u0430\u043D\u0451\u043D \u0432 \u0437\u0430\u043C\u0435\u0442\u043A\u0443 \u043B\u0438\u0434\u0430 #${leadId}` : `\u0427\u0435\u0440\u043D\u043E\u0432\u0438\u043A \u0441\u043E\u0445\u0440\u0430\u043D\u0451\u043D \u0432 \u0437\u0430\u043C\u0435\u0442\u043A\u0443 \u043B\u0438\u0434\u0430 #${leadId}; \u043E\u0442\u043F\u0440\u0430\u0432\u0438\u0442\u044C \u043B\u0438\u0434\u0443 \u0432\u0440\u0443\u0447\u043D\u0443\u044E`;
+    }
+    case "post": {
+      const en = str(p.en);
+      const ru = str(p.ru);
+      if (!en || !ru) throw new Error("\u0432 payload \u043D\u0435\u0442 en/ru");
+      const pairId = str(p.pairId) || "p-" + randomBytes(5).toString("hex");
+      const topic = str(p.topic) || null;
+      for (const [lang, body] of [["en", en], ["ru", ru]])
+        await createSocialPost(db2, { pairId, lang, body, topic: topic ?? void 0, channel: "telegram", status: "draft" });
+      return `\u041F\u0430\u0440\u0430 EN+RU \u0432 \u043E\u0447\u0435\u0440\u0435\u0434\u0438 \u043F\u043E\u0441\u0442\u043E\u0432 (draft, ${pairId})`;
+    }
+    case "task": {
+      const t = await createTask(db2, { text: str(p.text) || row.title, source: "council" });
+      return `\u0417\u0430\u0434\u0430\u0447\u0430 #${t.id} \u0437\u0430\u0432\u0435\u0434\u0435\u043D\u0430`;
+    }
+    default:
+      throw new Error(`\u043D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B\u0439 \u0442\u0438\u043F \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044F: ${row.type}`);
+  }
+}
+async function decide(db2, id, input) {
+  if (typeof input?.yes !== "boolean") throw new CouncilActionError('\u043D\u0443\u0436\u043D\u043E {"yes": true|false}', 400);
+  const row = await getActionById(db2, id);
+  if (!row) throw new CouncilActionError("not found", 404);
+  if (row.status !== "proposed" || row.decidedAt) throw new CouncilActionError(`\u0443\u0436\u0435 \u0440\u0435\u0448\u0435\u043D\u043E: ${row.status}`, 409);
+  const outcome = input.outcome;
+  if (input.yes && BOT_ONLY.has(row.type) && !(outcome && typeof outcome.ok === "boolean"))
+    throw new CouncilActionError("\u0442\u043E\u043B\u044C\u043A\u043E \u0438\u0437 \u0431\u043E\u0442\u0430", 400);
+  if (input.yes && !BOT_ONLY.has(row.type) && !["followup", "dd", "post", "task"].includes(row.type))
+    throw new CouncilActionError(`\u043D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B\u0439 \u0442\u0438\u043F \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044F: ${row.type}`, 400);
+  const [claimed] = await db2.update(councilActions).set({ decidedAt: /* @__PURE__ */ new Date() }).where(and8(eq13(councilActions.id, id), eq13(councilActions.status, "proposed"), isNull(councilActions.decidedAt))).returning();
+  if (!claimed) throw new CouncilActionError("\u0443\u0436\u0435 \u0440\u0435\u0448\u0435\u043D\u043E", 409);
+  let status;
+  let result;
+  if (!input.yes) {
+    status = "rejected";
+    result = "\u041E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u043E";
+  } else if (BOT_ONLY.has(row.type)) {
+    status = outcome.ok ? "done" : "failed";
+    result = str(outcome.result) || (outcome.ok ? "\u0418\u0441\u043F\u043E\u043B\u043D\u0435\u043D\u043E \u0431\u043E\u0442\u043E\u043C" : "\u0411\u043E\u0442 \u043D\u0435 \u0441\u043C\u043E\u0433 \u0438\u0441\u043F\u043E\u043B\u043D\u0438\u0442\u044C");
+  } else {
+    try {
+      result = await execute(db2, claimed);
+      status = "done";
+    } catch (err) {
+      status = "failed";
+      result = err instanceof Error ? err.message : String(err);
+    }
+  }
+  const [done] = await db2.update(councilActions).set({ status, result: result.slice(0, 1e3) }).where(eq13(councilActions.id, id)).returning();
+  return done;
+}
+
 // src/lib/contact-bot.ts
-import { and as and8, desc as desc6, eq as eq13 } from "drizzle-orm";
+import { and as and9, desc as desc7, eq as eq14 } from "drizzle-orm";
 
 // src/lib/ratelimit.ts
 import { sql as sql8 } from "drizzle-orm";
@@ -3815,7 +3947,7 @@ async function handleContactUpdate(db2, update, cfg) {
   if (!msg || !msg.from || msg.from.is_bot) return;
   if (msg.from.id === cfg.ownerId) {
     if (!msg.reply_to_message) return;
-    const rows = await db2.select().from(contactThreads).where(eq13(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
+    const rows = await db2.select().from(contactThreads).where(eq14(contactThreads.ownerMsgId, msg.reply_to_message.message_id)).limit(1);
     const thread = rows[0];
     if (!thread) {
       await tg(cfg, "sendMessage", {
@@ -3866,7 +3998,7 @@ async function handleContactUpdate(db2, update, cfg) {
       return;
     }
   }
-  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq13(contactThreads.clientChatId, msg.chat.id));
+  const history = await db2.select({ createdAt: contactThreads.createdAt }).from(contactThreads).where(eq14(contactThreads.clientChatId, msg.chat.id));
   const firstContact = history.length === 0;
   const cutoff = new Date(Date.now() - FLOOD_WINDOW_MS);
   const recent = history.filter((h2) => h2.createdAt > cutoff).length;
@@ -3906,9 +4038,9 @@ async function handleContactUpdate(db2, update, cfg) {
   let ai = null;
   if (AI_ENABLED && text2) {
     try {
-      const ownerRow = await db2.select({ id: contactMessages.id }).from(contactMessages).where(and8(eq13(contactMessages.clientChatId, msg.chat.id), eq13(contactMessages.role, "owner"))).limit(1);
+      const ownerRow = await db2.select({ id: contactMessages.id }).from(contactMessages).where(and9(eq14(contactMessages.clientChatId, msg.chat.id), eq14(contactMessages.role, "owner"))).limit(1);
       if (ownerRow.length === 0) {
-        const prior = await db2.select({ role: contactMessages.role, content: contactMessages.content }).from(contactMessages).where(eq13(contactMessages.clientChatId, msg.chat.id)).orderBy(desc6(contactMessages.createdAt)).limit(HISTORY_LIMIT);
+        const prior = await db2.select({ role: contactMessages.role, content: contactMessages.content }).from(contactMessages).where(eq14(contactMessages.clientChatId, msg.chat.id)).orderBy(desc7(contactMessages.createdAt)).limit(HISTORY_LIMIT);
         const history2 = prior.reverse().map((m) => ({ role: m.role, content: m.content }));
         const perChat = await checkRateLimit(db2, `contact-ai:${msg.chat.id}`, AI_DAILY_PER_CHAT, 86400);
         const global = await checkRateLimit(db2, "contact-ai:all", AI_DAILY_GLOBAL, 86400);
@@ -3967,7 +4099,7 @@ ${problems.join("\n")}`,
 }
 
 // src/lib/valuation.ts
-import { eq as eq14, desc as desc7 } from "drizzle-orm";
+import { eq as eq15, desc as desc8 } from "drizzle-orm";
 var ValuationInputError = class extends Error {
 };
 async function listFactorOverrides(db2) {
@@ -3978,7 +4110,7 @@ async function setFactorOverrides(db2, entries) {
     const key = String(e.key ?? "").trim();
     if (!key) throw new ValuationInputError("factor key is required");
     if (e.value === null) {
-      await db2.delete(valuationFactors).where(eq14(valuationFactors.key, key));
+      await db2.delete(valuationFactors).where(eq15(valuationFactors.key, key));
       continue;
     }
     const value = Number(e.value);
@@ -3992,7 +4124,7 @@ async function setFactorOverrides(db2, entries) {
 var COMP_TYPES = ["Land", "Villa", "House", "Apartment"];
 var COMP_STATUSES = ["active", "sold", "gone"];
 async function listComps(db2) {
-  return db2.select().from(valuationComps).orderBy(desc7(valuationComps.createdAt));
+  return db2.select().from(valuationComps).orderBy(desc8(valuationComps.createdAt));
 }
 async function addComp(db2, input) {
   const priceThb = Number(input.priceThb);
@@ -4037,11 +4169,11 @@ async function updateComp(db2, id, patch) {
   }
   if (patch.note !== void 0) set.note = patch.note?.trim() || null;
   if (Object.keys(set).length === 0) return null;
-  const [row] = await db2.update(valuationComps).set(set).where(eq14(valuationComps.id, id)).returning();
+  const [row] = await db2.update(valuationComps).set(set).where(eq15(valuationComps.id, id)).returning();
   return row ?? null;
 }
 async function deleteComp(db2, id) {
-  const rows = await db2.delete(valuationComps).where(eq14(valuationComps.id, id)).returning();
+  const rows = await db2.delete(valuationComps).where(eq15(valuationComps.id, id)).returning();
   return rows.length > 0;
 }
 async function logValuation(db2, input) {
@@ -4063,7 +4195,7 @@ async function logValuation(db2, input) {
   return row;
 }
 async function listValuations(db2, limit = 20) {
-  return db2.select().from(valuations).orderBy(desc7(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
+  return db2.select().from(valuations).orderBy(desc8(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
 }
 
 // src/lib/token-scope.ts
@@ -4682,6 +4814,41 @@ app.patch("/council-sessions/:id", async (c) => {
     if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
     console.error("[PATCH /council-sessions]", err);
     return c.json({ error: "update failed" }, 500);
+  }
+});
+app.get("/council-actions", async (c) => {
+  const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 200);
+  try {
+    return c.json(await listActions(db, { status: c.req.query("status") || void 0, limit }));
+  } catch (err) {
+    if (err instanceof CouncilActionError) return c.json({ error: err.message }, err.code);
+    throw err;
+  }
+});
+app.get("/council-actions/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  const row = await getActionById(db, id);
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+app.post("/council-actions", async (c) => {
+  try {
+    return c.json(await createAction(db, await c.req.json()), 201);
+  } catch (err) {
+    if (err instanceof CouncilActionError) return c.json({ error: err.message }, err.code);
+    console.error("[POST /council-actions]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+app.post("/council-actions/:id/decide", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    return c.json(await decide(db, id, await c.req.json()));
+  } catch (err) {
+    if (err instanceof CouncilActionError) return c.json({ error: err.message }, err.code);
+    console.error("[POST /council-actions/:id/decide]", err);
+    return c.json({ error: "decide failed" }, 500);
   }
 });
 app.get("/valuation/factors", async (c) => {
