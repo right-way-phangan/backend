@@ -759,6 +759,10 @@ export const councilSessions = pgTable(
     // бот считает; error = упал. Локальный claude-«мозг» обрабатывает pending.
     status: text("status").notNull().default("done"),
     errorText: text("error_text"), // если status=error
+    // Кого Зевс позвал: [{id:"rw-strategy",status:"pending|working|done|error"}, …,
+    // {id:"rw-critic",…}]. Бот пишет сразу после выбора отделов и обновляет по ходу
+    // разбора (читает Великое Древо). null — старые сессии / single-pass без роутера.
+    agents: jsonb("agents").$type<CouncilAgentState[]>(),
     answeredAt: timestamp("answered_at", { withTimezone: true }), // когда лёг ответ
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -768,6 +772,7 @@ export const councilSessions = pgTable(
   }),
 );
 
+export type CouncilAgentState = { id: string; status: "pending" | "working" | "done" | "error" };
 export type CouncilSessionRow = typeof councilSessions.$inferSelect;
 
 /**
