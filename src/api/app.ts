@@ -54,6 +54,10 @@ import {
   deleteTask as deleteAgentTask, createSession, requestCouncil, updateSession,
   listSessions, getSessionById, AgentTaskInputError,
 } from "../lib/agent-tasks";
+import {
+  createAction as createCouncilAction, listActions as listCouncilActions,
+  getActionById as getCouncilActionById, decide as decideCouncilAction, CouncilActionError,
+} from "../lib/council-actions";
 import { handleContactUpdate, contactSelfCheck, type ContactBotConfig } from "../lib/contact-bot";
 import {
   listFactorOverrides, setFactorOverrides, listComps, addComp, updateComp, deleteComp,
@@ -894,6 +898,51 @@ app.patch("/council-sessions/:id", async (c) => {
     if (err instanceof AgentTaskInputError) return c.json({ error: err.message }, 400);
     console.error("[PATCH /council-sessions]", err);
     return c.json({ error: "update failed" }, 500);
+  }
+});
+
+// ─── Действия совета под гейтом: proposed → «Да/Нет» из бота или Великого Древа ───
+// Один путь исполнения (lib/council-actions.ts). Трата и деплой — только из бота.
+
+/** Query: ?status=proposed|done|rejected|failed &limit=N (новые сверху). */
+app.get("/council-actions", async (c) => {
+  const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 200);
+  try {
+    return c.json(await listCouncilActions(db, { status: c.req.query("status") || undefined, limit }));
+  } catch (err) {
+    if (err instanceof CouncilActionError) return c.json({ error: err.message }, err.code);
+    throw err;
+  }
+});
+
+app.get("/council-actions/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  const row = await getCouncilActionById(db, id);
+  return row ? c.json(row) : c.json({ error: "not found" }, 404);
+});
+
+/** Бот: завести действие {sessionId?, agentId, type, title, payload} → proposed. */
+app.post("/council-actions", async (c) => {
+  try {
+    return c.json(await createCouncilAction(db, await c.req.json()), 201);
+  } catch (err) {
+    if (err instanceof CouncilActionError) return c.json({ error: err.message }, err.code);
+    console.error("[POST /council-actions]", err);
+    return c.json({ error: "create failed" }, 500);
+  }
+});
+
+/** {"yes": true|false} → исполнить/отклонить; повторное решение — 409. */
+app.post("/council-actions/:id/decide", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    return c.json(await decideCouncilAction(db, id, await c.req.json()));
+  } catch (err) {
+    if (err instanceof CouncilActionError) return c.json({ error: err.message }, err.code);
+    console.error("[POST /council-actions/:id/decide]", err);
+    return c.json({ error: "decide failed" }, 500);
   }
 });
 

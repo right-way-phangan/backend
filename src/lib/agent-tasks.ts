@@ -104,17 +104,21 @@ export interface CouncilSessionInputDTO {
   errorText?: string;
 }
 
-const AGENT_STATUSES = new Set(["pending", "working", "done", "error"]);
+// error — старое имя failed (до 2026-10-13), принимаем оба.
+const AGENT_STATUSES = new Set(["pending", "working", "done", "failed", "error"]);
 
-/** agents из бота: [{id:"rw-…", status}] — иначе 400 (мусор в мир Древа не пускаем). */
+/** agents из бота: [{id:"rw-…", task?, status, part?}] — иначе 400 (мусор в мир Древа не пускаем). */
 function parseAgents(raw: unknown): CouncilAgentState[] {
   if (!Array.isArray(raw)) throw new AgentTaskInputError("agents must be an array");
   return raw.map((a) => {
     const id = String(a?.id ?? "").trim();
     const status = String(a?.status ?? "");
     if (!/^rw-[a-z-]+$/.test(id) || !AGENT_STATUSES.has(status))
-      throw new AgentTaskInputError("agents[]: {id: rw-…, status: pending|working|done|error}");
-    return { id, status: status as CouncilAgentState["status"] };
+      throw new AgentTaskInputError("agents[]: {id: rw-…, status: pending|working|done|failed}");
+    const out: CouncilAgentState = { id, status: status as CouncilAgentState["status"] };
+    if (typeof a.task === "string" && a.task.trim()) out.task = a.task.trim().slice(0, 300);
+    if (typeof a.part === "string" && a.part.trim()) out.part = a.part.trim().slice(0, 8000);
+    return out;
   });
 }
 
@@ -163,7 +167,7 @@ export interface CouncilSessionPatchDTO {
   status?: string; // pending | processing | done | error
   answer?: string;
   errorText?: string | null;
-  agents?: unknown; // [{id, status}] — кого позвал Зевс (см. schema)
+  agents?: unknown; // [{id, task, status, part}] — кого позвал Зевс (см. schema)
 }
 
 /** Бот: claim (status=processing) и завершение (answer+done / error). */
