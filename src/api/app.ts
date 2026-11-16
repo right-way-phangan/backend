@@ -13,7 +13,7 @@
  */
 import "dotenv/config";
 import { timingSafeEqual } from "node:crypto";
-import { Hono } from "hono";
+import { Hono, type Context, type Next } from "hono";
 import { cors } from "hono/cors";
 import { createDb } from "../db/connect";
 import { getPublicObjects, getAllObjects, scanPhotosForDocuments, purgePhotosByUrl } from "../lib/queries";
@@ -134,6 +134,28 @@ if (API_TOKEN) {
     }
     return next();
   });
+}
+
+// Сайт кэширует каталог на час (тег "catalog"). Правки через /admin сбрасывают
+// его сами, а запись мимо админки (бот, скрипты, POST /objects из скилов) иначе
+// появлялась бы с задержкой до часа — поэтому после успешной записи в /objects*
+// бэкенд сам дёргает сброс. Ждём с таймаутом: на serverless фоновый fetch после
+// ответа может не успеть уйти. Сбой сброса запись не роняет.
+app.use("/objects/*", revalidateSiteCatalog);
+app.use("/objects", revalidateSiteCatalog);
+async function revalidateSiteCatalog(c: Context, next: Next) {
+  await next();
+  if (c.req.method === "GET" || c.res.status >= 300) return;
+  const site = process.env.SITE_URL ?? "https://rightwaygroup.co";
+  try {
+    await fetch(`${site}/api/revalidate-catalog`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${API_TOKEN ?? ""}` },
+      signal: AbortSignal.timeout(3_000),
+    });
+  } catch (err) {
+    console.error("[revalidate-catalog]", err);
+  }
 }
 
 app.get("/health", (c) => c.json({ ok: true, driver }));
