@@ -4258,6 +4258,22 @@ if (API_TOKEN) {
     return next();
   });
 }
+app.use("/objects/*", revalidateSiteCatalog);
+app.use("/objects", revalidateSiteCatalog);
+async function revalidateSiteCatalog(c, next) {
+  await next();
+  if (c.req.method === "GET" || c.res.status >= 300) return;
+  const site = process.env.SITE_URL ?? "https://rightwaygroup.co";
+  try {
+    await fetch(`${site}/api/revalidate-catalog`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${API_TOKEN ?? ""}` },
+      signal: AbortSignal.timeout(3e3)
+    });
+  } catch (err) {
+    console.error("[revalidate-catalog]", err);
+  }
+}
 app.get("/health", (c) => c.json({ ok: true, driver }));
 app.post("/telegram/contact", async (c) => {
   if (!CONTACT_BOT) return c.json({ error: "contact bot not configured" }, 503);
