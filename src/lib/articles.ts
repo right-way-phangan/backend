@@ -7,7 +7,7 @@
  * public blog converts it to KbBlock[] at render time.
  *
  * Every article is submitted as an EN+RU pair: two rows sharing one slug,
- * differing in lang (en → /blog/slug, ru → /ru/blog/slug). Each language is
+ * differing in lang (en → /blog/slug, ru → /ru/blog/slug, th → /th/blog/slug). Each language is
  * reviewed and published independently. Slug is unique per (slug, lang).
  */
 import { eq, and, desc, sql, inArray } from "drizzle-orm";
@@ -37,7 +37,7 @@ function slugify(input: string): string {
 
 export interface ArticleInputDTO {
   slug?: string;
-  lang?: string; // en | ru
+  lang?: string; // en | ru | th
   title: string;
   excerpt: string;
   topic?: string;
@@ -56,7 +56,7 @@ export async function createArticle(db: AnyPgDatabase, input: ArticleInputDTO): 
   if (!excerpt) throw new ArticleInputError("excerpt is required");
   if (!bodyMd) throw new ArticleInputError("bodyMd is required");
 
-  const lang = input.lang === "ru" ? "ru" : "en";
+  const lang = input.lang === "ru" || input.lang === "th" ? input.lang : "en";
   let slug = (input.slug?.trim() || slugify(title)) || `article-${Date.now()}`;
   // ensure uniqueness within the language — append -2, -3, … on collision
   // (the same slug in the other language is the paired translation, not a clash)
