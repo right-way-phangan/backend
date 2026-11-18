@@ -3502,7 +3502,7 @@ async function createArticle(db2, input) {
   if (!title) throw new ArticleInputError("title is required");
   if (!excerpt) throw new ArticleInputError("excerpt is required");
   if (!bodyMd) throw new ArticleInputError("bodyMd is required");
-  const lang = input.lang === "ru" ? "ru" : "en";
+  const lang = input.lang === "ru" || input.lang === "th" ? input.lang : "en";
   let slug = input.slug?.trim() || slugify(title) || `article-${Date.now()}`;
   const existing = await db2.select({ slug: articles.slug }).from(articles).where(
     and5(

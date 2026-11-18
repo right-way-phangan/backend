@@ -711,7 +711,7 @@ app.post("/leads/:id/shortlist-view", async (c) => {
 
 // ─── Blog articles (content pipeline + review-gate) ───
 
-/** List articles. Query: ?status=pending|published|rejected &lang=en|ru */
+/** List articles. Query: ?status=pending|published|rejected &lang=en|ru|th */
 app.get("/articles", async (c) => {
   const status = c.req.query("status") as "pending" | "published" | "rejected" | undefined;
   const lang = c.req.query("lang") || undefined;
