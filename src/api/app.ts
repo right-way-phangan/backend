@@ -34,7 +34,7 @@ import {
   setDealChecklistItem,
   listEvents, listContacts, addTouch, addShortlistView, mergeContacts,
 } from "../lib/crm";
-import { verifyLogin } from "../lib/auth";
+import { verifyLogin, listUsers, createUser, updateUser, deleteUser } from "../lib/auth";
 import { getSetting, listSettings, setSetting } from "../lib/settings";
 import { recordSearch, demandSummary } from "../lib/demand";
 import { trackView, viewsSummary, crossShopperCount } from "../lib/views";
@@ -205,6 +205,35 @@ app.get("/telegram/selfcheck", async (c) => {
 });
 
 /** Verify CRM user credentials. Web issues its own session cookie on success. */
+// ─── Пользователи админки (/admin/users). Без хэшей паролей. ───
+app.get("/users", async (c) => c.json(await listUsers(db)));
+
+/** Create or reset (idempotent by email): { email, password, name?, role?, developer?, lang? }. */
+app.post("/users", async (c) => {
+  try {
+    return c.json(await createUser(db, await c.req.json()), 201);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "create user failed" }, 400);
+  }
+});
+
+app.patch("/users/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  const u = await updateUser(db, id, await c.req.json());
+  return u ? c.json(u) : c.json({ error: "not found or nothing to update" }, 404);
+});
+
+app.delete("/users/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    return (await deleteUser(db, id)) ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "delete failed" }, 400);
+  }
+});
+
 app.post("/auth/login", async (c) => {
   const { email, password } = await c.req.json();
   const user = await verifyLogin(db, String(email ?? ""), String(password ?? ""));
