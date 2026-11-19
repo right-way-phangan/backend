@@ -64,6 +64,7 @@ import {
   logValuation, listValuations, ValuationInputError,
 } from "../lib/valuation";
 import { checkRateLimit } from "../lib/ratelimit";
+import { listOwners, createOwner, updateOwner, deleteOwner, linkObjects, unlinkObject, OwnerInputError } from "../lib/owners";
 import { tokenAllows } from "../lib/token-scope";
 
 const API_TOKEN = process.env.API_TOKEN;
@@ -868,6 +869,58 @@ app.delete("/agent-tasks/:id", async (c) => {
   const ok = await deleteAgentTask(db, id);
   return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
 });
+
+// ─── Справочник собственников (/admin/owners). Целиком внутреннее. ───
+
+app.get("/owners", async (c) => c.json(await listOwners(db)));
+
+app.post("/owners", async (c) => {
+  try {
+    return c.json(await createOwner(db, await c.req.json()), 201);
+  } catch (err) {
+    if (err instanceof OwnerInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /owners]", err);
+    return c.json({ error: "create owner failed" }, 500);
+  }
+});
+
+app.patch("/owners/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const row = await updateOwner(db, id, await c.req.json());
+    return row ? c.json(row) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    if (err instanceof OwnerInputError) return c.json({ error: err.message }, 400);
+    console.error("[PATCH /owners]", err);
+    return c.json({ error: "update owner failed" }, 500);
+  }
+});
+
+app.delete("/owners/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  return (await deleteOwner(db, id)) ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+
+/** Body: { rwNumbers: string[] } — привязать объекты (юниты проекта идут за родителем). */
+app.post("/owners/:id/objects", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const body = (await c.req.json()) as { rwNumbers?: unknown };
+    const rws = Array.isArray(body.rwNumbers) ? body.rwNumbers.map(String) : [];
+    return c.json(await linkObjects(db, id, rws));
+  } catch (err) {
+    if (err instanceof OwnerInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /owners/:id/objects]", err);
+    return c.json({ error: "link failed" }, 500);
+  }
+});
+
+app.delete("/owners/objects/:rw", async (c) =>
+  (await unlinkObject(db, c.req.param("rw"))) ? c.json({ ok: true }) : c.json({ error: "not found" }, 404),
+);
 
 /** История советов. Query: ?limit=N &status=pending|processing|done|error (свежие первыми). */
 app.get("/council-sessions", async (c) => {

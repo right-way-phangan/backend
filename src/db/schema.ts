@@ -128,6 +128,8 @@ export const objects = pgTable(
 
     // Operational
     ownerName: text("owner_name"),
+    // Справочник собственников (/admin/owners). НЕ публичное — в домен-объект не мапится.
+    ownerId: integer("owner_id").references(() => owners.id, { onDelete: "set null" }),
     buildingRules: text("building_rules"),
     reasonForSelling: text("reason_for_selling"),
     timeOnMarketMonths: doublePrecision("time_on_market_months"),
@@ -187,6 +189,30 @@ export const objects = pgTable(
  * image (villa/house/project = exterior, land = aerial — enforced in app).
  * `visibility` stays 'public' here; non-public imagery belongs in object_docs.
  */
+/**
+ * Справочник собственников (/admin/owners): кто владеет объектами каталога и
+ * как с ним связаться. Один человек — одна строка, объекты ссылаются через
+ * objects.owner_id. Статус = ход перепроверки (актуальность/цена), заметка —
+ * журнал касаний с датами. Целиком внутреннее, наружу не отдаётся.
+ */
+export const owners = pgTable("owners", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  role: text("role").notNull().default("owner"), // owner | developer | broker
+  phone: text("phone"),
+  whatsapp: text("whatsapp"),
+  line: text("line"),
+  telegram: text("telegram"),
+  email: text("email"),
+  lang: text("lang"), // th | en | ru — на каком языке писать
+  status: text("status").notNull().default("new"), // new | contacted | confirmed | no_answer | refused
+  note: text("note"),
+  lastTouchAt: timestamp("last_touch_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type OwnerRow = typeof owners.$inferSelect;
+
 export const objectPhotos = pgTable(
   "object_photos",
   {

@@ -253,6 +253,13 @@
       "when": 1791870158486,
       "tag": "0035_council_actions",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1795081914252,
+      "tag": "0036_owners",
+      "breakpoints": true
     }
   ]
 }
