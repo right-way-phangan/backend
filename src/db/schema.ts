@@ -565,6 +565,7 @@ export const users = pgTable("users", {
   passwordHash: text("password_hash").notNull(),
   name: text("name"),
   role: text("role").notNull().default("agent"), // admin | agent | partner
+  lang: text("lang"), // UI language of /admin for this user: ru | en | th (null = ru)
   developer: text("developer"), // partner only: developer slug (e.g. arqa-development) → sees leads tagged developer:<slug>
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

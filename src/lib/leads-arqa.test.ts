@@ -134,10 +134,10 @@ test("заметки: по умолчанию внутренние (в т.ч. с
 });
 
 test("createUser: partner требует developer, остальные его не принимают", async () => {
-  const p = await createUser(db, { email: "P@x.co", password: "pw", role: "partner", developer: "ARQA-Development" });
+  const p = await createUser(db, { email: "P@x.co", password: "pw-long-enough", role: "partner", developer: "ARQA-Development" });
   assert.equal(p.developer, "arqa-development");
-  assert.equal((await verifyLogin(db, "p@x.co", "pw"))!.developer, "arqa-development");
-  await assert.rejects(createUser(db, { email: "p2@x.co", password: "pw", role: "partner" }));
-  await assert.rejects(createUser(db, { email: "a@x.co", password: "pw", role: "agent", developer: "arqa" }));
-  await assert.rejects(createUser(db, { email: "b@x.co", password: "pw", role: "root" }));
+  assert.equal((await verifyLogin(db, "p@x.co", "pw-long-enough"))!.developer, "arqa-development");
+  await assert.rejects(createUser(db, { email: "p2@x.co", password: "pw-long-enough", role: "partner" }));
+  await assert.rejects(createUser(db, { email: "a@x.co", password: "pw-long-enough", role: "agent", developer: "arqa" }));
+  await assert.rejects(createUser(db, { email: "b@x.co", password: "pw-long-enough", role: "root" }));
 });

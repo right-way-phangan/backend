@@ -493,6 +493,8 @@ var users = pgTable("users", {
   name: text("name"),
   role: text("role").notNull().default("agent"),
   // admin | agent | partner
+  lang: text("lang"),
+  // UI language of /admin for this user: ru | en | th (null = ru)
   developer: text("developer"),
   // partner only: developer slug (e.g. arqa-development) → sees leads tagged developer:<slug>
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
@@ -3005,12 +3007,60 @@ async function replaceObjectContacts(db2, rwNumber, contacts2) {
 // src/lib/auth.ts
 import bcrypt from "bcryptjs";
 import { eq as eq6 } from "drizzle-orm";
+var PUBLIC_COLS = {
+  id: users.id,
+  email: users.email,
+  name: users.name,
+  role: users.role,
+  developer: users.developer,
+  lang: users.lang
+};
+var ROLES = ["admin", "agent", "partner"];
+var UI_LANGS = ["ru", "en", "th"];
+async function createUser(db2, input) {
+  if (!input.email?.includes("@")) throw new Error("valid email required");
+  if (!input.password || input.password.length < 8) throw new Error("password must be at least 8 characters");
+  const lang = input.lang && UI_LANGS.includes(input.lang) ? input.lang : null;
+  const passwordHash = await bcrypt.hash(input.password, 10);
+  const email = input.email.trim().toLowerCase();
+  const role = input.role || "agent";
+  if (!ROLES.includes(role)) throw new Error(`role must be one of ${ROLES.join("|")}`);
+  const developer = input.developer?.trim().toLowerCase() || null;
+  if (role === "partner" && !developer) throw new Error("role=partner requires a developer");
+  if (role !== "partner" && developer) throw new Error("developer is only valid for role=partner");
+  const [u2] = await db2.insert(users).values({ email, passwordHash, name: input.name, role, developer, lang }).onConflictDoUpdate({
+    target: users.email,
+    set: { passwordHash, name: input.name, role, developer, lang }
+  }).returning(PUBLIC_COLS);
+  return u2;
+}
 async function verifyLogin(db2, email, password) {
   const [u2] = await db2.select().from(users).where(eq6(users.email, email.trim().toLowerCase()));
   if (!u2) return null;
   const ok = await bcrypt.compare(password, u2.passwordHash);
   if (!ok) return null;
-  return { id: u2.id, email: u2.email, name: u2.name, role: u2.role, developer: u2.developer };
+  return { id: u2.id, email: u2.email, name: u2.name, role: u2.role, developer: u2.developer, lang: u2.lang };
+}
+async function listUsers(db2) {
+  return db2.select({ ...PUBLIC_COLS, createdAt: users.createdAt }).from(users).orderBy(users.id);
+}
+async function updateUser(db2, id, patch) {
+  const set = {};
+  if ("lang" in patch) set.lang = patch.lang && UI_LANGS.includes(patch.lang) ? patch.lang : null;
+  if (typeof patch.name === "string") set.name = patch.name.trim() || null;
+  if (!Object.keys(set).length) return null;
+  const [u2] = await db2.update(users).set(set).where(eq6(users.id, id)).returning(PUBLIC_COLS);
+  return u2 ?? null;
+}
+async function deleteUser(db2, id) {
+  const [u2] = await db2.select({ role: users.role }).from(users).where(eq6(users.id, id));
+  if (!u2) return false;
+  if (u2.role === "admin") {
+    const admins = await db2.select({ id: users.id }).from(users).where(eq6(users.role, "admin"));
+    if (admins.length <= 1) throw new Error("cannot delete the last admin");
+  }
+  await db2.delete(users).where(eq6(users.id, id));
+  return true;
 }
 
 // src/lib/settings.ts
@@ -4423,6 +4473,29 @@ app.get("/telegram/selfcheck", async (c) => {
   } catch (err) {
     console.error("[GET /telegram/selfcheck]", err.message);
     return c.json({ healthy: false, error: err.message }, 500);
+  }
+});
+app.get("/users", async (c) => c.json(await listUsers(db)));
+app.post("/users", async (c) => {
+  try {
+    return c.json(await createUser(db, await c.req.json()), 201);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "create user failed" }, 400);
+  }
+});
+app.patch("/users/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  const u2 = await updateUser(db, id, await c.req.json());
+  return u2 ? c.json(u2) : c.json({ error: "not found or nothing to update" }, 404);
+});
+app.delete("/users/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    return await deleteUser(db, id) ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "delete failed" }, 400);
   }
 });
 app.post("/auth/login", async (c) => {
