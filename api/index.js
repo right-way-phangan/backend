@@ -40,6 +40,7 @@ __export(schema_exports, {
   objectViewVisitors: () => objectViewVisitors,
   objectViewsDaily: () => objectViewsDaily,
   objects: () => objects,
+  owners: () => owners,
   pipelines: () => pipelines,
   processedUpdates: () => processedUpdates,
   projectUnits: () => projectUnits,
@@ -154,6 +155,8 @@ var objects = pgTable(
     constructionUpdates: jsonb("construction_updates").$type(),
     // Operational
     ownerName: text("owner_name"),
+    // Справочник собственников (/admin/owners). НЕ публичное — в домен-объект не мапится.
+    ownerId: integer("owner_id").references(() => owners.id, { onDelete: "set null" }),
     buildingRules: text("building_rules"),
     reasonForSelling: text("reason_for_selling"),
     timeOnMarketMonths: doublePrecision("time_on_market_months"),
@@ -205,6 +208,25 @@ var objects = pgTable(
     districtIdx: index("objects_district_idx").on(t.district)
   })
 );
+var owners = pgTable("owners", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  role: text("role").notNull().default("owner"),
+  // owner | developer | broker
+  phone: text("phone"),
+  whatsapp: text("whatsapp"),
+  line: text("line"),
+  telegram: text("telegram"),
+  email: text("email"),
+  lang: text("lang"),
+  // th | en | ru — на каком языке писать
+  status: text("status").notNull().default("new"),
+  // new | contacted | confirmed | no_answer | refused
+  note: text("note"),
+  lastTouchAt: timestamp("last_touch_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+});
 var objectPhotos = pgTable(
   "object_photos",
   {
@@ -1084,11 +1106,11 @@ async function scanPhotosForDocuments(db2, opts = {}) {
   return { enabled: true, scanned: pool.length, flagged };
 }
 async function purgePhotosByUrl(db2, urls) {
-  const clean2 = [...new Set(urls.map((u2) => String(u2).trim()).filter(Boolean))];
-  if (!clean2.length) return { removed: 0, objectsTouched: 0 };
-  const hits = await db2.select({ id: objectPhotos.id, objectId: objectPhotos.objectId }).from(objectPhotos).where(inArray(objectPhotos.url, clean2));
+  const clean3 = [...new Set(urls.map((u2) => String(u2).trim()).filter(Boolean))];
+  if (!clean3.length) return { removed: 0, objectsTouched: 0 };
+  const hits = await db2.select({ id: objectPhotos.id, objectId: objectPhotos.objectId }).from(objectPhotos).where(inArray(objectPhotos.url, clean3));
   if (!hits.length) return { removed: 0, objectsTouched: 0 };
-  await db2.delete(objectPhotos).where(inArray(objectPhotos.url, clean2));
+  await db2.delete(objectPhotos).where(inArray(objectPhotos.url, clean3));
   const touched = [...new Set(hits.map((h2) => h2.objectId))];
   for (const id of touched) {
     await db2.update(objects).set({ updatedAt: /* @__PURE__ */ new Date() }).where(eq(objects.id, id));
@@ -2386,7 +2408,7 @@ function parseOwnerContactText(text2) {
   return { role: "owner", name: name || void 0, phone, isPrimary: true };
 }
 function contactRowValues(c, objectId, sort) {
-  const clean2 = (v) => {
+  const clean3 = (v) => {
     const t = (v ?? "").trim();
     return t || null;
   };
@@ -2394,12 +2416,12 @@ function contactRowValues(c, objectId, sort) {
   const values = {
     objectId,
     role,
-    name: clean2(c.name),
-    phone: clean2(c.phone),
-    line: clean2(c.line),
-    whatsapp: clean2(c.whatsapp),
-    telegram: clean2(c.telegram),
-    note: clean2(c.note),
+    name: clean3(c.name),
+    phone: clean3(c.phone),
+    line: clean3(c.line),
+    whatsapp: clean3(c.whatsapp),
+    telegram: clean3(c.telegram),
+    note: clean3(c.note),
     isPrimary: !!c.isPrimary,
     sort,
     updatedAt: /* @__PURE__ */ new Date()
@@ -2765,11 +2787,11 @@ async function createObject(db2, input) {
   };
 }
 async function addObjectPhotos(db2, rwNumber, urls) {
-  const clean2 = urls.map((u2) => String(u2).trim()).filter((u2) => /^https?:\/\//i.test(u2));
+  const clean3 = urls.map((u2) => String(u2).trim()).filter((u2) => /^https?:\/\//i.test(u2));
   const [obj] = await db2.select({ id: objects.id }).from(objects).where(eq5(objects.rwNumber, rwNumber));
   if (!obj) return null;
-  if (clean2.length === 0) return { rwNumber, added: 0, coverSet: false, rejected: [] };
-  const { accepted, rejected } = await partitionByVetting(clean2);
+  if (clean3.length === 0) return { rwNumber, added: 0, coverSet: false, rejected: [] };
+  const { accepted, rejected } = await partitionByVetting(clean3);
   if (accepted.length === 0) return { rwNumber, added: 0, coverSet: false, rejected };
   const existing = await db2.select({ sort: objectPhotos.sort }).from(objectPhotos).where(eq5(objectPhotos.objectId, obj.id));
   const hadPhotos = existing.length > 0;
@@ -2886,14 +2908,14 @@ async function updateObject(db2, rwNumber, patch) {
     "timeOnMarketMonths",
     "outreachAttempts"
   ]);
-  const TEXT_FIELDS = /* @__PURE__ */ new Set(["descriptionRaw", "descriptionManualEn", "descriptionManualRu"]);
+  const TEXT_FIELDS2 = /* @__PURE__ */ new Set(["descriptionRaw", "descriptionManualEn", "descriptionManualRu"]);
   for (const [k, v] of Object.entries(patch)) {
     if (!PATCHABLE.has(k)) continue;
     if (MONEY_FIELDS.has(k)) {
       set[k] = v == null ? null : positiveOrUndefined(v) ?? null;
       continue;
     }
-    if (TEXT_FIELDS.has(k)) {
+    if (TEXT_FIELDS2.has(k)) {
       set[k] = typeof v === "string" && v.trim() ? redactConfidential(v.trim()) : null;
       continue;
     }
@@ -2924,9 +2946,9 @@ async function updateObject(db2, rwNumber, patch) {
       continue;
     }
     if (k === "constructionUpdates" && Array.isArray(v)) {
-      const clean2 = sanitizeConstructionUpdates(v);
+      const clean3 = sanitizeConstructionUpdates(v);
       if (v.length === 0) set[k] = null;
-      else if (clean2 && clean2.length) set[k] = clean2;
+      else if (clean3 && clean3.length) set[k] = clean3;
       continue;
     }
     if (k === "priceStages" || k === "timeline" || k === "team") {
@@ -4198,6 +4220,108 @@ async function listValuations(db2, limit = 20) {
   return db2.select().from(valuations).orderBy(desc8(valuations.createdAt)).limit(Math.min(Math.max(limit, 1), 100));
 }
 
+// src/lib/owners.ts
+import { asc as asc2, eq as eq16, inArray as inArray4, isNull as isNull2, like, or } from "drizzle-orm";
+var OwnerInputError = class extends Error {
+};
+var OWNER_ROLES = ["owner", "developer", "broker"];
+var OWNER_STATUSES = ["new", "contacted", "confirmed", "no_answer", "refused"];
+var LANGS = ["th", "en", "ru"];
+var TEXT_FIELDS = ["name", "phone", "whatsapp", "line", "telegram", "email", "note"];
+var LIVE_STATUSES = ["Active", "Reserved", "Hold"];
+var objectCols = {
+  ownerId: objects.ownerId,
+  rwNumber: objects.rwNumber,
+  titleEn: objects.titleEn,
+  type: objects.type,
+  status: objects.status,
+  district: objects.district,
+  priceThb: objects.priceThb,
+  outreachStatus: objects.outreachStatus,
+  outreachDate: objects.outreachDate,
+  needsReview: objects.needsReview
+};
+function isUnit2(rw) {
+  return /^RW-P\d{4}-/.test(rw);
+}
+async function listOwners(db2) {
+  const rows = await db2.select().from(owners).orderBy(asc2(owners.name));
+  const linked = await db2.select(objectCols).from(objects).where(inArray4(objects.status, [...LIVE_STATUSES, "Archive", "Withdrawn", "Sold"]));
+  const byOwner = /* @__PURE__ */ new Map();
+  const unassigned = [];
+  for (const { ownerId, ...o } of linked) {
+    if (ownerId != null) {
+      const list = byOwner.get(ownerId) ?? [];
+      list.push(o);
+      byOwner.set(ownerId, list);
+    } else if (LIVE_STATUSES.includes(o.status) && !isUnit2(o.rwNumber)) {
+      unassigned.push(o);
+    }
+  }
+  unassigned.sort((a, b) => a.rwNumber.localeCompare(b.rwNumber));
+  return {
+    owners: rows.map((r) => ({ ...r, objects: (byOwner.get(r.id) ?? []).sort((a, b) => a.rwNumber.localeCompare(b.rwNumber)) })),
+    unassigned
+  };
+}
+function clean2(input, creating) {
+  const set = {};
+  for (const k of TEXT_FIELDS) {
+    if (!(k in input)) continue;
+    const v = input[k];
+    set[k] = typeof v === "string" && v.trim() ? v.trim().slice(0, k === "note" ? 8e3 : 200) : null;
+  }
+  if (creating || "name" in input) {
+    if (!set.name) throw new OwnerInputError("name is required");
+  }
+  if ("role" in input) {
+    if (!OWNER_ROLES.includes(input.role)) throw new OwnerInputError("bad role");
+    set.role = input.role;
+  }
+  if ("status" in input) {
+    if (!OWNER_STATUSES.includes(input.status)) throw new OwnerInputError("bad status");
+    set.status = input.status;
+  }
+  if ("lang" in input) {
+    set.lang = LANGS.includes(input.lang) ? input.lang : null;
+  }
+  if (input.touch === true) set.lastTouchAt = /* @__PURE__ */ new Date();
+  return set;
+}
+async function createOwner(db2, input) {
+  const [row] = await db2.insert(owners).values(clean2(input, true)).returning();
+  return row;
+}
+async function updateOwner(db2, id, input) {
+  const set = { ...clean2(input, false), updatedAt: /* @__PURE__ */ new Date() };
+  const [row] = await db2.update(owners).set(set).where(eq16(owners.id, id)).returning();
+  return row ?? null;
+}
+async function deleteOwner(db2, id) {
+  const rows = await db2.delete(owners).where(eq16(owners.id, id)).returning({ id: owners.id });
+  return rows.length > 0;
+}
+async function linkObjects(db2, ownerId, rws) {
+  const wanted = [...new Set(rws.map((r) => r.trim().toUpperCase()).filter(Boolean))];
+  if (!wanted.length) throw new OwnerInputError("rwNumbers required");
+  const [owner] = await db2.select({ id: owners.id }).from(owners).where(eq16(owners.id, ownerId));
+  if (!owner) throw new OwnerInputError("owner not found");
+  const found = await db2.select({ rw: objects.rwNumber }).from(objects).where(inArray4(objects.rwNumber, wanted));
+  const ok = found.map((f) => f.rw);
+  if (ok.length) {
+    await db2.update(objects).set({ ownerId }).where(inArray4(objects.rwNumber, ok));
+    const all = await db2.select({ rw: objects.rwNumber }).from(objects).where(isNull2(objects.ownerId));
+    const units = all.map((u2) => u2.rw).filter((rw) => ok.some((p) => rw.startsWith(`${p}-`)));
+    if (units.length) await db2.update(objects).set({ ownerId }).where(inArray4(objects.rwNumber, units));
+  }
+  return { linked: ok, missing: wanted.filter((w) => !ok.includes(w)) };
+}
+async function unlinkObject(db2, rw) {
+  const key = rw.trim().toUpperCase();
+  const rows = await db2.update(objects).set({ ownerId: null }).where(or(eq16(objects.rwNumber, key), like(objects.rwNumber, `${key}-%`))).returning({ rw: objects.rwNumber });
+  return rows.length > 0;
+}
+
 // src/lib/token-scope.ts
 import { timingSafeEqual } from "node:crypto";
 var TRACK_PREFIXES = ["/track/"];
@@ -4789,6 +4913,50 @@ app.delete("/agent-tasks/:id", async (c) => {
   const ok = await deleteTask(db, id);
   return ok ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
 });
+app.get("/owners", async (c) => c.json(await listOwners(db)));
+app.post("/owners", async (c) => {
+  try {
+    return c.json(await createOwner(db, await c.req.json()), 201);
+  } catch (err) {
+    if (err instanceof OwnerInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /owners]", err);
+    return c.json({ error: "create owner failed" }, 500);
+  }
+});
+app.patch("/owners/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const row = await updateOwner(db, id, await c.req.json());
+    return row ? c.json(row) : c.json({ error: "not found" }, 404);
+  } catch (err) {
+    if (err instanceof OwnerInputError) return c.json({ error: err.message }, 400);
+    console.error("[PATCH /owners]", err);
+    return c.json({ error: "update owner failed" }, 500);
+  }
+});
+app.delete("/owners/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  return await deleteOwner(db, id) ? c.json({ ok: true }) : c.json({ error: "not found" }, 404);
+});
+app.post("/owners/:id/objects", async (c) => {
+  const id = Number(c.req.param("id"));
+  if (!Number.isInteger(id)) return c.json({ error: "bad id" }, 400);
+  try {
+    const body = await c.req.json();
+    const rws = Array.isArray(body.rwNumbers) ? body.rwNumbers.map(String) : [];
+    return c.json(await linkObjects(db, id, rws));
+  } catch (err) {
+    if (err instanceof OwnerInputError) return c.json({ error: err.message }, 400);
+    console.error("[POST /owners/:id/objects]", err);
+    return c.json({ error: "link failed" }, 500);
+  }
+});
+app.delete(
+  "/owners/objects/:rw",
+  async (c) => await unlinkObject(db, c.req.param("rw")) ? c.json({ ok: true }) : c.json({ error: "not found" }, 404)
+);
 app.get("/council-sessions", async (c) => {
   const limit = Math.min(Math.max(Number(c.req.query("limit")) || 20, 1), 100);
   const status = c.req.query("status") || void 0;
