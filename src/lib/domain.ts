@@ -13,6 +13,8 @@ type ConstructionUpdate = {
   dateRu?: string;
   note?: string;
   noteRu?: string;
+  dateTh?: string;
+  noteTh?: string;
   photos: string[];
 };
 
