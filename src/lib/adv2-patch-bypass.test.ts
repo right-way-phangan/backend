@@ -206,6 +206,26 @@ test("АТАКА 23: массив constructionUpdates чистится сани�
   assert.doesNotMatch(JSON.stringify(saved), /javascript:/);
 });
 
+// АТАКА 23c [MEDIUM]: тайская подпись записи стройки не теряется при сохранении
+// | ИНВАРИАНТ: санитайзер пропускает dateTh/noteTh так же, как RU-пару; иначе
+//   TH-текст из редактора молча выбрасывается и /th/.../construction остаётся на EN.
+//   Запись только с TH-подписью — тоже законная веха
+// | код: backend/src/lib/write.ts sanitizeConstructionUpdates
+test("АТАКА 23c: dateTh/noteTh сохраняются", async () => {
+  const { rwNumber } = await createObject(db, { type: "Project", district: "Ban Tai" });
+  await updateObject(db, rwNumber, {
+    constructionUpdates: [
+      { date: "July 2026", dateTh: " กรกฎาคม 2569 ", note: "Roof", noteTh: "มุงหลังคา", photos: ["https://cdn.example/a.jpg"] },
+      { noteTh: "เทฐานราก", photos: [] },
+    ],
+  });
+  const saved = (await rowOf(rwNumber)).constructionUpdates as Array<Record<string, unknown>>;
+  assert.equal(saved.length, 2);
+  assert.equal(saved[0].dateTh, "กรกฎาคม 2569");
+  assert.equal(saved[0].noteTh, "มุงหลังคา");
+  assert.equal(saved[1].noteTh, "เทฐานราก");
+});
+
 // АТАКА 23b [MEDIUM]: очистка журнала стройки — только по явному пустому массиву
 // | ИНВАРИАНТ: `[]` = осознанная очистка (null); массив, из которого не осталось
 //   ни одной валидной записи, поле НЕ трогает — иначе одна кривая запись

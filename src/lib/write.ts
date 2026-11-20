@@ -392,7 +392,10 @@ export function sanitizePolygon(
 /** Ход стройки: массив фотоотчётов. Записи без фото и не-http ссылки отбрасываем. */
 export function sanitizeConstructionUpdates(
   raw: unknown,
-): Array<{ date: string; dateRu?: string; note?: string; noteRu?: string; photos: string[] }> | undefined {
+): Array<{
+  date: string; dateRu?: string; dateTh?: string;
+  note?: string; noteRu?: string; noteTh?: string; photos: string[];
+}> | undefined {
   if (!Array.isArray(raw)) return undefined;
   const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
   const out = raw.flatMap((u) => {
@@ -404,12 +407,14 @@ export function sanitizeConstructionUpdates(
     // Запись без фото — законная текстовая веха («залили фундамент», фото позже).
     // Требование обязательного фото приводило к молчаливой потере записи целиком;
     // отбрасываем только совсем пустые (ни даты, ни заметки).
-    if (photos.length === 0 && !str(r.date) && !str(r.note) && !str(r.noteRu)) return [];
+    if (photos.length === 0 && !str(r.date) && !str(r.note) && !str(r.noteRu) && !str(r.noteTh)) return [];
     return [{
       date: str(r.date),
       dateRu: str(r.dateRu) || undefined,
+      dateTh: str(r.dateTh) || undefined,
       note: str(r.note) || undefined,
       noteRu: str(r.noteRu) || undefined,
+      noteTh: str(r.noteTh) || undefined,
       photos,
     }];
   });

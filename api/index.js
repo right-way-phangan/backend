@@ -150,7 +150,7 @@ var objects = pgTable(
     timeline: jsonb("timeline").$type(),
     team: jsonb("team").$type(),
     // Ход стройки — фотоотчёты по датам для страницы /projects/[slug]/construction.
-    // Публичное: фото со стройплощадки, подпись EN+RU. Порядок = порядок в массиве
+    // Публичное: фото со стройплощадки, подпись EN+RU+TH. Порядок = порядок в массиве
     // (новые записи сверху задаёт редактор, не БД).
     constructionUpdates: jsonb("construction_updates").$type(),
     // Operational
@@ -2618,12 +2618,14 @@ function sanitizeConstructionUpdates(raw) {
     if (!u2 || typeof u2 !== "object") return [];
     const r = u2;
     const photos = (Array.isArray(r.photos) ? r.photos : []).map(str2).filter((p) => /^https?:\/\//i.test(p));
-    if (photos.length === 0 && !str2(r.date) && !str2(r.note) && !str2(r.noteRu)) return [];
+    if (photos.length === 0 && !str2(r.date) && !str2(r.note) && !str2(r.noteRu) && !str2(r.noteTh)) return [];
     return [{
       date: str2(r.date),
       dateRu: str2(r.dateRu) || void 0,
+      dateTh: str2(r.dateTh) || void 0,
       note: str2(r.note) || void 0,
       noteRu: str2(r.noteRu) || void 0,
+      noteTh: str2(r.noteTh) || void 0,
       photos
     }];
   });
